@@ -1071,6 +1071,16 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             user-select: all;
         }
         .pair-cmd:hover { border-color: var(--accent); }
+        .pair-os-btn {
+            background: transparent; border: 1px solid var(--border);
+            color: var(--text-dim); padding: 4px 10px;
+            border-radius: 3px; cursor: pointer;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.68rem; letter-spacing: 0.5px;
+            transition: border-color 0.15s, color 0.15s, background 0.15s;
+        }
+        .pair-os-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .pair-os-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
         .pair-close {
             background: transparent; border: 1px solid var(--border);
             color: var(--text-dim); padding: 6px 14px;
@@ -1092,7 +1102,16 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
     <div id="pair-modal" class="hidden">
         <div class="pair-box">
             <h3>Connect Device</h3>
-            <p>Run this command on the machine you want to connect:</p>
+            <p>Select the target OS, then run the command on the device you want to connect:</p>
+            <div style="display:flex;gap:6px;margin-bottom:12px">
+                <button class="pair-os-btn" onclick="selectPairOS('Windows')">Windows</button>
+                <button class="pair-os-btn" onclick="selectPairOS('macOS')">macOS</button>
+                <button class="pair-os-btn" onclick="selectPairOS('Linux')">Linux</button>
+            </div>
+            <div id="pair-relay-row" style="display:none;align-items:center;gap:6px;margin-bottom:12px">
+                <span style="color:var(--text-dim);font-size:0.62rem;letter-spacing:0.5px;text-transform:uppercase;white-space:nowrap">Device Relay</span>
+                <input type="text" id="pair-relay-url" placeholder="localhost or https://relay.example.com/device-relay" style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;font-family:'JetBrains Mono',monospace;font-size:0.68rem;border-radius:3px">
+            </div>
             <div class="pair-cmd" id="pair-cmd-text" onclick="navigator.clipboard.writeText(this.textContent).then(()=>{this.style.borderColor='var(--accent)';setTimeout(()=>this.style.borderColor='',1400)})">Generating...</div>
             <p id="pair-status">Waiting for device to connect... (expires in 5 min)</p>
             <div style="display:flex;gap:8px">
@@ -1285,7 +1304,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             vision: 'half',
             preview: false,
             thinking: true,
-            relayUrl: _isLocalHost ? 'wss://infero.net/device-relay/ws' : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/device-relay/ws`,
+            relayUrl: _isLocalHost ? 'ws://localhost:8081' : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/device-relay/ws`,
             devices: {},
             hostDevice: 'this browser',
         };
@@ -2563,17 +2582,27 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
 
         var _relayWs = null;
         var _relayConnected = false;
+        var _relayGeneration = 0;
         var _pendingShellRequests = {};  // req_id -> {resolve, reject, timer, device_name}
         var _relayPingTimer = null;
         var _relayPongTimer = null;
+        var _pairModalCloseTimer = null;
+        var _pairCountdownInterval = null;
 
         function initRelay() {
-            const url = settings.relayUrl || SETTINGS_DEFAULTS.relayUrl;
+            const gen = ++_relayGeneration;
+            if (_relayWs) { _relayWs.onclose = null; _relayWs.close(); _relayWs = null; _relayConnected = false; }
+            const url = settings.relayHost
+                ? (settings.relayHost.includes('://')
+                    ? settings.relayHost.replace(/^https/, 'wss').replace(/^http/, 'ws').replace(/\/$/, '') + '/ws'
+                    : `ws://${settings.relayHost}:8081`)
+                : (settings.relayUrl || SETTINGS_DEFAULTS.relayUrl);
             if (!url) return;
             let _retryCount = 0;
             let _retryTimer = null;
             let _disconnectNotifyTimer = null;
             function scheduleReconnect() {
+                if (_relayGeneration !== gen) return;
                 clearTimeout(_retryTimer);
                 // Immediate first retry, then 1s for 10s, then exponential backoff
                 let delay;
@@ -2584,6 +2613,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 _retryCount++;
             }
             function connect() {
+                if (_relayGeneration !== gen) return;
                 try {
                     _relayWs = new WebSocket(url);
                 } catch (e) { scheduleReconnect(); return; }
@@ -2672,28 +2702,57 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             connect();
         }
 
+        function selectPairOS(os) {
+            window._pairSelectedOS = os;
+            document.querySelectorAll('.pair-os-btn').forEach(b =>
+                b.classList.toggle('active', b.textContent === os));
+            if (window._pairCode && window._pairRelayHttpUrl) {
+                const cmd = os === 'Windows'
+                    ? `irm ${window._pairRelayHttpUrl}/pair/${window._pairCode}/ps1 | iex`
+                    : `curl ${window._pairRelayHttpUrl}/pair/${window._pairCode} | sh`;
+                document.getElementById('pair-cmd-text').textContent = cmd;
+            }
+        }
+
         async function startPairing() {
+            if (_pairModalCloseTimer) { clearTimeout(_pairModalCloseTimer); _pairModalCloseTimer = null; }
+            if (_pairCountdownInterval) { clearInterval(_pairCountdownInterval); _pairCountdownInterval = null; }
+            const _isFirstOpen = document.getElementById('pair-modal').classList.contains('hidden');
             document.getElementById('pair-modal').classList.remove('hidden');
             document.getElementById('pair-cmd-text').textContent = 'Generating...';
             const statusEl = document.getElementById('pair-status');
             statusEl.textContent = 'Requesting pairing code...';
             statusEl.style.cssText = '';
+            const ua = navigator.userAgent;
+            const detectedOS = /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : 'Linux';
+            if (!window._pairSelectedOS) window._pairSelectedOS = detectedOS;
+            selectPairOS(window._pairSelectedOS);
+            document.getElementById('pair-relay-row').style.display = _isLocalHost ? 'flex' : 'none';
+            if (_isFirstOpen) document.getElementById('pair-relay-url').value = settings.relayHost || '';
             try {
-                const relayHttpUrl = (settings.relayUrl || SETTINGS_DEFAULTS.relayUrl)
-                    .replace('wss://', 'https://').replace('ws://', 'http://').replace(/\/ws$/, '');
-                const ua = navigator.userAgent;
+                const _relayHost = document.getElementById('pair-relay-url').value.trim() || 'localhost';
+                const _relayIsUrl = _relayHost.includes('://');
+                const relayHttpUrl = _isLocalHost
+                    ? (_relayIsUrl ? _relayHost.replace(/\/$/, '') : `http://${_relayHost}:8080`)
+                    : `${location.origin}/device-relay`;
+                const relayWsUrl = _relayIsUrl
+                    ? relayHttpUrl.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/ws'
+                    : `ws://${_relayHost}:8081`;
                 const bName = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' :
                     /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' :
                     /Firefox\//.test(ua) ? 'Firefox' : 'Browser';
-                const osName = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' :
-                    /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' :
-                    /Linux/.test(ua) ? 'Linux' : 'Unknown';
-                const clientName = `${bName} · ${osName}`;
+                const clientName = `${bName} · ${window._pairSelectedOS}`;
                 const ecKeyPair = await crypto.subtle.generateKey(
                     { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']
                 );
                 const pubRaw = await crypto.subtle.exportKey('raw', ecKeyPair.publicKey);
                 const browserPubB64 = btoa(String.fromCharCode(...new Uint8Array(pubRaw)));
+                // Save private key to sessionStorage BEFORE the network request so it
+                // survives a browser reload triggered during the fetch or device connection
+                try {
+                    const jwk = await crypto.subtle.exportKey('jwk', ecKeyPair.privateKey);
+                    sessionStorage.setItem('_pairPendingJwk', JSON.stringify(jwk));
+                } catch (_) {}
                 const res = await fetch(`${relayHttpUrl}/pair/create`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2701,9 +2760,28 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 });
                 if (!res.ok) throw new Error(`Server error: ${res.status}`);
                 const { code } = await res.json();
-                const curlCmd = `curl ${relayHttpUrl}/pair/${code} | sh`;
-                document.getElementById('pair-cmd-text').textContent = curlCmd;
-                document.getElementById('pair-status').textContent = 'Click to copy. Waiting for device... (expires in 5 min)';
+                window._pairCode = code;
+                window._pairRelayHttpUrl = relayHttpUrl;
+                const _newHost = _relayHost === 'localhost' ? undefined : _relayHost;
+                if (_newHost !== settings.relayHost) {
+                    settings.relayHost = _newHost;
+                    saveSettingsToStorage(settings);
+                    initRelay();
+                }
+                selectPairOS(window._pairSelectedOS);
+                const _pairExpireAt = Date.now() + 300000;
+                const _updateCountdown = () => {
+                    const secsLeft = Math.max(0, Math.round((_pairExpireAt - Date.now()) / 1000));
+                    const mm = String(Math.floor(secsLeft / 60)).padStart(2, '0');
+                    const ss = String(secsLeft % 60).padStart(2, '0');
+                    const statusEl = document.getElementById('pair-status');
+                    if (statusEl && !statusEl.textContent.startsWith('✓')) {
+                        statusEl.textContent = `Click to copy. Waiting for device... (expires in ${mm}:${ss})`;
+                    }
+                    if (secsLeft === 0) { clearInterval(_pairCountdownInterval); _pairCountdownInterval = null; }
+                };
+                _updateCountdown();
+                _pairCountdownInterval = setInterval(_updateCountdown, 1000);
                 window._pendingPairKey = { privateKey: ecKeyPair.privateKey };
             } catch (e) {
                 document.getElementById('pair-cmd-text').textContent = '';
@@ -2712,8 +2790,14 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         }
 
         function closePairModal() {
+            if (_pairModalCloseTimer) { clearTimeout(_pairModalCloseTimer); _pairModalCloseTimer = null; }
+            if (_pairCountdownInterval) { clearInterval(_pairCountdownInterval); _pairCountdownInterval = null; }
             document.getElementById('pair-modal').classList.add('hidden');
             window._pendingPairKey = null;
+            sessionStorage.removeItem('_pairPendingJwk');
+            window._pairSelectedOS = null;
+            window._pairCode = null;
+            window._pairRelayHttpUrl = null;
         }
 
         async function importDeviceKey(keyB64) {
@@ -2789,12 +2873,24 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         async function _loadBip39() {
             if (_bip39) return _bip39;
             try {
-                const relayHttp = (settings.relayUrl || SETTINGS_DEFAULTS.relayUrl)
-                    .replace('wss://', 'https://').replace('ws://', 'http://').replace(/\/ws$/, '');
+                const relayHttp = settings.relayHost
+                    ? (settings.relayHost.includes('://') ? settings.relayHost.replace(/\/$/, '') : `http://${settings.relayHost}:8080`)
+                    : (settings.relayUrl || SETTINGS_DEFAULTS.relayUrl)
+                        .replace('wss://', 'https://').replace('ws://', 'http://').replace(/\/ws$/, '');
                 const res = await fetch(`${relayHttp}/bip39`);
                 if (res.ok) _bip39 = (await res.text()).trim().split(/\s+/);
             } catch (_) {}
             return _bip39;
+        }
+
+        function agentLogHint(device_name) {
+            const os = settings.devices?.[device_name]?.os || '';
+            const logPath = os === 'Windows'
+                ? '%APPDATA%\\infero\\agent.log'
+                : os === 'macOS' ? '~/.infero/agent.log'
+                : os === 'Linux' ? '~/.infero/agent.log'
+                : '~/.infero/agent.log  (or %APPDATA%\\infero\\agent.log on Windows)';
+            return `Check shell output or \`${logPath}\` on the device — verify words must match.`;
         }
 
         async function pairVerifyWords(keyB64) {
@@ -2855,16 +2951,20 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 const { device_name, online } = msg;
                 console.log(`[relay] device_status: ${device_name} ${online?'online':'offline'}, hostDevice=${settings.hostDevice}, preferredHost=${settings.preferredHost}, wasOnline=${settings.devices?.[device_name]?.online}`);
                 if (!settings.devices) settings.devices = {};
-                if (online && msg.fresh_pair && window._pendingPairKey) {
+                if (online && msg.fresh_pair && msg.device_pub && window._pendingPairKey) {
+                    // Fresh pair: device derived its key from THIS browser_pub → ECDH keys match
                     const keyB64 = await deriveSharedKey(window._pendingPairKey.privateKey, msg.device_pub);
-                    settings.devices[device_name] = { keyB64, online: true, type: msg.device_type || 'shell' };
+                    settings.devices[device_name] = { keyB64, online: true, type: msg.device_type || 'shell', os: msg.device_os || '' };
                     window._pendingPairKey = null;
+                    sessionStorage.removeItem('_pairPendingJwk');
+                    saveSettingsToStorage(settings);
                     const vwords = await pairVerifyWords(keyB64);
+                    if (_pairCountdownInterval) { clearInterval(_pairCountdownInterval); _pairCountdownInterval = null; }
                     const statusEl = document.getElementById('pair-status');
                     statusEl.textContent = `✓ ${device_name} connected!`;
                     statusEl.style.cssText = 'color:#fff;font-weight:500;font-size:0.82rem;';
-                    appendMsgUI('system', `🔐 E2E encrypted · AES-256-GCM via ECDH/P-256  \nDevice: ${device_name} · Verify Words: **${vwords}**  \nIf your device shows the same words, the channel is clean. The relay is blind. Trust the math.`);
-                    setTimeout(closePairModal, 2000);
+                    appendMsgUI('system', `🔐 E2E encrypted · AES-256-GCM via ECDH/P-256  \nDevice: ${device_name} · Verify Words: **${vwords}**  \n${agentLogHint(device_name)}`);
+                    _pairModalCloseTimer = setTimeout(() => { _pairModalCloseTimer = null; closePairModal(); }, 2000);
                 } else if (settings.devices[device_name]) {
                     const wasOnline = settings.devices[device_name].online;
                     settings.devices[device_name].online = online;
@@ -2876,12 +2976,56 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                         renderDeviceList();
                         return;
                     }
+                    if (msg.device_os) settings.devices[device_name].os = msg.device_os;
+                    if (!wasOnline && online && settings.devices[device_name].keyB64) {
+                        const vwords = await pairVerifyWords(settings.devices[device_name].keyB64);
+                        appendMsgUI('system', `🔐 ${device_name} · Verify Words: **${vwords}**  \n${agentLogHint(device_name)}`);
+                    }
+                } else {
+                    // Online but unknown device — try to recover from sessionStorage first
+                    if (!window._unregisteredDevices) window._unregisteredDevices = {};
+                    if (online) {
+                        const _savedJwk = sessionStorage.getItem('_pairPendingJwk');
+                        if (msg.device_pub && _savedJwk) {
+                            // Browser reloaded during pairing — recover K1 using persisted private key
+                            try {
+                                const _savedPriv = await crypto.subtle.importKey(
+                                    'jwk', JSON.parse(_savedJwk),
+                                    { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']
+                                );
+                                const keyB64 = await deriveSharedKey(_savedPriv, msg.device_pub);
+                                settings.devices[device_name] = { keyB64, online: true, type: msg.device_type || 'shell', os: msg.device_os || '' };
+                                saveSettingsToStorage(settings);
+                                sessionStorage.removeItem('_pairPendingJwk');
+                                renderDeviceList();
+                                const vwords = await pairVerifyWords(keyB64);
+                                appendMsgUI('system', `🔐 Pairing complete: ${device_name} · Verify Words: **${vwords}**  \n${agentLogHint(device_name)}`);
+                            } catch (_e) {
+                                window._unregisteredDevices[device_name] = { type: msg.device_type || 'shell', os: msg.device_os || '' };
+                                if (msg.fresh_pair) {
+                                    appendMsgUI('system', `System - [Device] - ${device_name} pairing incomplete — device connected after the pair modal closed, so its initial key was not captured. Click **Pair** in Settings to complete pairing.`);
+                                }
+                            }
+                        } else {
+                            window._unregisteredDevices[device_name] = { type: msg.device_type || 'shell', os: msg.device_os || '' };
+                            if (msg.fresh_pair) {
+                                appendMsgUI('system', `System - [Device] - ${device_name} pairing incomplete — device connected after the pair modal closed, so its initial key was not captured. Click **Pair** in Settings to complete pairing.`);
+                            }
+                        }
+                    } else {
+                        delete window._unregisteredDevices[device_name];
+                    }
                 }
                 saveSettingsToStorage(settings);
                 renderDeviceList();
                 if (settings.devices[device_name]?.hidden) return;  // hidden device — no UI/consciousness noise
-                const note = `System - [Device] - ${device_name} is now ${online ? 'online' : 'offline'}`;
+                const _wasDeleted = !online && window._removedDevices?.has(device_name);
+                if (_wasDeleted) window._removedDevices.delete(device_name);
+                const note = `System - [Device] - ${device_name} ${_wasDeleted ? 'deleted' : (online ? 'is now online' : 'is now offline')}`;
                 appendMsgUI('system', note);
+                if (online && window._unregisteredDevices?.[device_name] && !msg.fresh_pair) {
+                    appendMsgUI('system', `[Device] - ${device_name} is not paired with this browser. Open Settings → click **Pair** next to it to establish an encrypted channel.`);
+                }
                 // Don't write device status to consciousness — reconnection noise pollutes AI context
                 // Auto takeover if core loop host went offline
                 if (!online && settings.hostDevice === device_name) {
@@ -2927,6 +3071,28 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     }
                 }
                 console.log(`[relay] device_status END: preferred=${settings.preferredHost} host=${settings.hostDevice} online=${online}`);
+            }
+            if (msg.type === 'rekeying_response') {
+                const { device_pub } = msg;
+                const device_name = msg.device_name || Object.keys(window._rekeyingDevices || {})[0];
+                const rekeyState = window._rekeyingDevices?.[device_name];
+                if (!rekeyState || !device_pub) return;
+                try {
+                    const keyB64 = await deriveSharedKey(rekeyState.privateKey, device_pub);
+                    if (!settings.devices) settings.devices = {};
+                    const devType = window._unregisteredDevices?.[device_name]?.type || 'shell';
+                    const devOs = window._unregisteredDevices?.[device_name]?.os || '';
+                    settings.devices[device_name] = { keyB64, online: true, type: devType, os: devOs };
+                    saveSettingsToStorage(settings);
+                    delete window._rekeyingDevices[device_name];
+                    if (window._unregisteredDevices) delete window._unregisteredDevices[device_name];
+                    renderDeviceList();
+                    const vwords = await pairVerifyWords(keyB64);
+                    appendMsgUI('system', `🔐 Pairing complete: ${device_name} · Verify Words: **${vwords}**  \n${agentLogHint(device_name)}`);
+                } catch (e) {
+                    appendMsgUI('system', `⚠ Re-key failed for ${device_name}: ${e.message}`);
+                }
+                return;
             }
             if (msg.type === 'device_removed') {
                 const { device_name } = msg;
@@ -3238,7 +3404,24 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     <span style="color:var(--text-dim);font-size:0.6rem;margin-right:2px">${d.online ? 'online' : 'offline'}</span>
                     ${hostIcon}${controls}
                 </div>`;
-            }).join('');
+            }).join('') + Object.keys(window._unregisteredDevices || {}).map(name =>
+                `<div style="display:flex;align-items:center;gap:4px;font-size:0.62rem;padding:2px 4px;font-family:'JetBrains Mono',monospace">
+                    <span style="width:7px;height:7px;border-radius:50%;margin-right:5px;flex-shrink:0;background:#e67e22;box-shadow:0 0 4px #e67e2288"></span>
+                    <span style="color:var(--text-dim);flex:1">${name}</span>
+                    <button onclick="startRekey('${name}')" style="background:var(--accent-dim);border:1px solid var(--accent);color:var(--accent);padding:1px 6px;font-family:'JetBrains Mono',monospace;font-size:0.58rem;border-radius:3px;cursor:pointer">Pair</button>
+                </div>`
+            ).join('');
+        }
+
+        async function startRekey(device_name) {
+            if (!_relayWs || !_relayConnected) { appendMsgUI('system', '⚠ Relay not connected'); return; }
+            if (!window._rekeyingDevices) window._rekeyingDevices = {};
+            const ecKeyPair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+            const pubRaw = await crypto.subtle.exportKey('raw', ecKeyPair.publicKey);
+            const browserPubB64 = btoa(String.fromCharCode(...new Uint8Array(pubRaw)));
+            window._rekeyingDevices[device_name] = { privateKey: ecKeyPair.privateKey };
+            _relayWs.send(JSON.stringify({ type: 'rekeying_request', device_name, browser_pub: browserPubB64 }));
+            appendMsgUI('system', `Sending re-key request to ${device_name}...`);
         }
 
         function setPreferredHost(name) {
@@ -3473,16 +3656,26 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 _relayWs.send(JSON.stringify({ type: 'device_remove', device_name: name }));
             }
             if (settings.hostDevice === name) settings.hostDevice = 'this browser';
+            const wasOnline = settings.devices[name]?.online;
             delete settings.devices[name];
             saveSettingsToStorage(settings);
             renderDeviceList();
+            if (!window._removedDevices) window._removedDevices = new Set();
+            window._removedDevices.add(name);
+            if (!wasOnline) {
+                // Device already offline — relay won't send device_status:offline, so show message now
+                appendMsgUI('system', `System - [Device] - ${name} deleted`);
+                window._removedDevices.delete(name);
+            }
+            // If was online: "deleted" message shown when device_status:offline arrives
         }
 
         async function loadModels() {
             try {
                 const isLocal = !location.host || location.host.startsWith('localhost') || location.host.startsWith('127.0.0.1');
                 const modelsUrl = isLocal ? './models.json' : location.origin + '/genesis/models.json';
-                const res = await fetch(modelsUrl);
+                let res = await fetch(modelsUrl).catch(() => null);
+                if (!res?.ok) res = await fetch('https://infero.net/genesis/models.json');
                 const data = await res.json();
                 const select = document.getElementById('set-model');
                 // Load providers

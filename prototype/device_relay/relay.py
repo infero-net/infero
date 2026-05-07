@@ -83,7 +83,7 @@ async def send_to_browsers(instance_id, msg_raw, exclude_ws=None):
 
 _AGENT_PY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent.py')
 def _load_agent_py():
-    with open(_AGENT_PY_PATH, 'r') as f:
+    with open(_AGENT_PY_PATH, 'r', encoding='utf-8') as f:
         return f.read()
 
 AGENT_PY = _load_agent_py()  # loaded once at startup; restart relay to pick up changes
@@ -100,7 +100,7 @@ BROWSER_PUB="{BROWSER_PUB}"
 CLIENT_NAME="{CLIENT_NAME}"
 
 # Auto-detect dev vs prod based on relay URL
-if echo "$RELAY_WS" | grep -q "dev\."; then
+if echo "$RELAY_WS" | grep -qE "dev[0-9]*\."; then
     INFERO_DIR="$HOME/.infero-dev"
     INFERO_CMD="infero-dev"
 else
@@ -128,7 +128,7 @@ curl -fsSL "$RELAY_HTTP/update" -o "$AGENT"
 if [ ! -s "$AGENT" ]; then echo "[infero] Failed to download agent.py"; exit 1; fi
 
 # ── Update instances.json (append or update this instance) ───────────────────
-INSTANCE_ID="$INSTANCE_ID" TOKEN="$TOKEN" BROWSER_PUB="$BROWSER_PUB" RELAY_WS="$RELAY_WS" CLIENT_NAME="$CLIENT_NAME" INFERO_DIR="$INFERO_DIR" \
+INSTANCE_ID="$INSTANCE_ID" TOKEN="$TOKEN" BROWSER_PUB="$BROWSER_PUB" RELAY_WS="$RELAY_WS" RELAY_HTTP="$RELAY_HTTP" CLIENT_NAME="$CLIENT_NAME" INFERO_DIR="$INFERO_DIR" \
 "$VENV_DIR/bin/python3" -c "
 import json, os
 from datetime import datetime
@@ -141,7 +141,7 @@ first_added = existing.get('first_added') if existing else datetime.now().strfti
 instances = [i for i in instances if i.get('instance_id') != iid]
 instances.append({'instance_id': iid, 'token': os.environ['TOKEN'],
                   'browser_pub': os.environ['BROWSER_PUB'], 'relay_ws': os.environ['RELAY_WS'],
-                  'client_name': os.environ['CLIENT_NAME'],
+                  'relay_http': os.environ['RELAY_HTTP'], 'client_name': os.environ['CLIENT_NAME'],
                   'first_added': first_added})
 json.dump(instances, open(f, 'w'), indent=2)
 "
@@ -353,21 +353,6 @@ ENDOFSERVICE
     echo "[infero] Auto-start registered (systemd)"
 fi
 
-# ── Wait for verify words from agent ────────────────────────────────────────
-VFILE="$INFERO_DIR/verify_{INSTANCE_ID}.tmp"
-rm -f "$VFILE"
-echo ""
-echo "[infero] Connecting to relay..."
-VWORDS=""
-for i in $(seq 1 20); do
-    sleep 1
-    if [ -f "$VFILE" ]; then
-        VWORDS=$(cat "$VFILE")
-        rm -f "$VFILE"
-        break
-    fi
-done
-
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " ✓ Pairing request sent"
@@ -408,6 +393,123 @@ def build_script(relay_ws, instance_id, token, browser_pub, client_name='Unknown
     script = script.replace('{CLIENT_NAME}', client_name)
     return script
 
+
+DEVICE_SCRIPT_PS1_TEMPLATE = r"""
+$RELAY_WS = "{RELAY_WS}"
+$RELAY_HTTP = "{RELAY_HTTP}"
+$INSTANCE_ID = "{INSTANCE_ID}"
+$TOKEN = "{TOKEN}"
+$BROWSER_PUB = "{BROWSER_PUB}"
+$CLIENT_NAME = "{CLIENT_NAME}"
+
+$INFERO_DIR = "$env:APPDATA\infero"
+$VENV_DIR = "$INFERO_DIR\venv"
+$AGENT = "$INFERO_DIR\agent.py"
+
+New-Item -ItemType Directory -Force -Path $INFERO_DIR | Out-Null
+
+if (-not (Test-Path "$VENV_DIR\Scripts\python.exe")) {
+    Write-Host "[infero] Creating virtual environment..."
+    python -m venv $VENV_DIR
+}
+Write-Host "[infero] Installing requirements..."
+& "$VENV_DIR\Scripts\pip.exe" install -q cryptography websockets aiohttp
+Write-Host "[infero] Dependencies ready"
+
+Write-Host "[infero] Downloading agent..."
+Invoke-WebRequest -Uri "$RELAY_HTTP/update" -OutFile $AGENT -UseBasicParsing
+if (-not (Test-Path $AGENT) -or (Get-Item $AGENT).Length -eq 0) {
+    Write-Error "[infero] Failed to download agent.py"; exit 1
+}
+
+$env:INSTANCE_ID = $INSTANCE_ID; $env:TOKEN = $TOKEN
+$env:BROWSER_PUB = $BROWSER_PUB; $env:RELAY_WS = $RELAY_WS
+$env:RELAY_HTTP = $RELAY_HTTP; $env:CLIENT_NAME = $CLIENT_NAME; $env:INFERO_DIR = $INFERO_DIR
+
+$VWORDS_LINE = & "$VENV_DIR\Scripts\python.exe" -c @"
+import json, os, base64, hashlib, urllib.request
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ec import ECDH, SECP256R1
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from datetime import datetime
+
+browser_pub_b64 = os.environ['BROWSER_PUB']
+relay_http = os.environ['RELAY_HTTP']
+instance_id = os.environ['INSTANCE_ID']
+token = os.environ['TOKEN']
+relay_ws = os.environ['RELAY_WS']
+client_name = os.environ['CLIENT_NAME']
+infero_dir = os.environ['INFERO_DIR']
+
+pad = 4 - len(browser_pub_b64) % 4
+if pad != 4: browser_pub_b64 += '=' * pad
+browser_pub_bytes = base64.b64decode(browser_pub_b64)
+browser_pub = ec.EllipticCurvePublicKey.from_encoded_point(SECP256R1(), browser_pub_bytes)
+device_priv = ec.generate_private_key(SECP256R1())
+shared = device_priv.exchange(ECDH(), browser_pub)
+aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b'infero-device-relay-v1').derive(shared)
+device_pub_b64 = base64.b64encode(device_priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)).decode()
+aes_key_b64 = base64.b64encode(aes_key).decode()
+
+try:
+    bip39 = urllib.request.urlopen(relay_http + '/bip39', timeout=5).read().decode().split()
+except Exception:
+    bip39 = []
+if len(bip39) >= 2048:
+    h = hashlib.sha256(aes_key).digest()
+    n = (h[0] << 14) | (h[1] << 6) | (h[2] >> 2)
+    vwords = bip39[n >> 11] + ' ' + bip39[n & 0x7ff]
+else:
+    vwords = '(wordlist unavailable)'
+
+f = os.path.join(infero_dir, 'instances.json')
+try: instances = json.load(open(f))
+except: instances = []
+existing = next((i for i in instances if i.get('instance_id') == instance_id), None)
+first_added = existing.get('first_added') if existing else datetime.now().strftime('%b %d, %Y, %H:%M')
+instances = [i for i in instances if i.get('instance_id') != instance_id]
+instances.append({'instance_id': instance_id, 'token': token,
+                  'browser_pub': browser_pub_b64.rstrip('='),
+                  'aes_key': aes_key_b64, 'device_pub': device_pub_b64,
+                  'relay_ws': relay_ws, 'relay_http': relay_http,
+                  'client_name': client_name, 'first_added': first_added})
+json.dump(instances, open(f, 'w'), indent=2)
+print('VWORDS:' + vwords)
+"@
+$VWORDS = ($VWORDS_LINE | Where-Object { $_ -match '^VWORDS:' } | Select-Object -Last 1) -replace '^VWORDS:', ''
+Write-Host "[infero] Instance saved"
+
+$Action = New-ScheduledTaskAction -Execute "$VENV_DIR\Scripts\python.exe" -Argument "-u `"$AGENT`""
+$Trigger = New-ScheduledTaskTrigger -AtLogOn
+$Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "InferoDevice" -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
+Write-Host "[infero] Auto-start registered (Task Scheduler)"
+
+Write-Host ""
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+Write-Host " Pairing request sent"
+if ($VWORDS) { Write-Host " Verify Words: $VWORDS" }
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+Write-Host "  This device will auto-connect on every login."
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+Write-Host ""
+Write-Host "[infero] Connecting to relay..."
+Start-Process -WindowStyle Hidden -FilePath "$VENV_DIR\Scripts\python.exe" -ArgumentList "-u `"$AGENT`""
+"""
+
+def build_script_ps1(relay_ws, instance_id, token, browser_pub, client_name='Unknown', relay_http=None):
+    if relay_http is None:
+        relay_http = relay_ws.replace('wss://', 'https://').replace('ws://', 'http://').replace('/ws', '')
+    s = DEVICE_SCRIPT_PS1_TEMPLATE
+    for k, v in [('RELAY_WS', relay_ws), ('RELAY_HTTP', relay_http),
+                 ('INSTANCE_ID', instance_id), ('TOKEN', token),
+                 ('BROWSER_PUB', browser_pub), ('CLIENT_NAME', client_name)]:
+        s = s.replace('{' + k + '}', v)
+    return s
+
 # ─── HTTP handlers ──────────────────────────────────────────────────────────────
 
 async def handle_pair_create(request):
@@ -441,7 +543,7 @@ async def handle_pair_create(request):
         pending_pairs.pop(code, None)
     asyncio.create_task(cleanup())
 
-    return web.json_response({'code': code})
+    return web.json_response({'code': code}, headers={'Access-Control-Allow-Origin': '*'})
 
 
 async def handle_pair_get(request):
@@ -480,6 +582,33 @@ async def handle_pair_get(request):
     )
 
 
+async def handle_pair_get_ps1(request):
+    ip = request.remote
+    if not _rate_limit_ok(ip, 'pair_get', max_requests=20, window_seconds=300):
+        return web.Response(status=429, text='Write-Error "[infero] Rate limit exceeded."')
+    code = request.match_info['code'].upper()
+    entry = pending_pairs.get(code)
+    if not entry or time.time() > entry['expires']:
+        pending_pairs.pop(code, None)
+        return web.Response(text='Write-Error "[infero] Code not found or expired."', content_type='text/plain')
+    instance_id = entry['instance_id']
+    client_name = entry.get('client_name', 'Unknown')
+    browser_pub = entry['browser_pub']
+    token = secrets.token_urlsafe(32)
+    device_tokens[token] = f"{instance_id}:__pending__"
+    save_tokens()
+    pending_pairs.pop(code, None)
+    req_host = request.host.split(':')[0]  # IP or hostname without port
+    http_port = int(os.environ.get('HTTP_PORT', 8080))
+    ws_port = int(os.environ.get('WS_PORT', 8081))
+    relay_ws = os.environ.get('RELAY_WS_URL', f'ws://{req_host}:{ws_port}')
+    relay_http = os.environ.get('RELAY_HTTP_URL') or relay_ws.replace('wss://', 'https://').replace('ws://', 'http://').replace('/ws', '')
+    script = build_script_ps1(relay_ws, instance_id, token, browser_pub, client_name, relay_http)
+    return web.Response(text=script, content_type='text/plain',
+                        headers={'Content-Disposition': 'inline; filename="infero_connect.ps1"',
+                                 'Access-Control-Allow-Origin': '*'})
+
+
 # ─── WebSocket handler ──────────────────────────────────────────────────────────
 
 async def ws_handler(websocket):
@@ -498,14 +627,18 @@ async def ws_handler(websocket):
             browser_conns.setdefault(instance_id, []).append(websocket)
             role = 'browser'
             print(f"[{ts()}] [relay] Browser connected: {instance_id[:12]}... ({len(browser_conns[instance_id])} total)")
-            # Push current online devices for this instance
+            # Push current online devices for this instance (include device_pub so browser can complete key exchange)
             for key, info in device_conns.items():
                 if info['instance_id'] == instance_id:
                     try:
                         await websocket.send(json.dumps({
                             'type': 'device_status',
                             'device_name': info['device_name'],
-                            'online': True
+                            'device_type': info.get('device_type', 'shell'),
+                            'online': True,
+                            'fresh_pair': False,
+                            'device_pub': info.get('device_pub', ''),
+                            'device_os': info.get('device_os', '')
                         }))
                     except Exception:
                         pass
@@ -529,7 +662,9 @@ async def ws_handler(websocket):
                 'instance_id': instance_id,
                 'device_name': device_name,
                 'device_type': device_type,
-                'token': token
+                'token': token,
+                'device_pub': msg.get('device_pub', ''),
+                'device_os': msg.get('device_os', '')
             }
             role = 'device'
             print(f"[{ts()}] [relay] Device connected: {device_name} (instance {instance_id[:12]}...)")
@@ -541,7 +676,8 @@ async def ws_handler(websocket):
                 'device_type': device_type,
                 'online': True,
                 'fresh_pair': fresh_pair,
-                'device_pub': msg.get('device_pub', '')
+                'device_pub': msg.get('device_pub', ''),
+                'device_os': msg.get('device_os', '')
             }), exclude_ws=websocket)
         else:
             await websocket.close(4000, 'Unknown handshake type')
@@ -558,8 +694,8 @@ async def ws_handler(websocket):
 
             # ─── Distributed loop messages (any role can send) ────────────
             # Broadcast to all other nodes in this instance
-            # loop_status: device→browsers only (device_name is sender, not target)
-            if mtype == 'loop_status':
+            # loop_status / rekeying_response: device→browsers only
+            if mtype in ('loop_status', 'rekeying_response'):
                 await send_to_browsers(instance_id, raw)
                 continue
             if mtype in ('stream_token', 'exec_display', 'settings_update'):
@@ -571,7 +707,8 @@ async def ws_handler(websocket):
                 continue
             # Forward to a specific device by name
             if mtype in ('loop_handoff', 'loop_stop', 'exec_request', 'exec_result',
-                         'user_input', 'request_device_data', 'device_data_response'):
+                         'user_input', 'request_device_data', 'device_data_response',
+                         'rekeying_request'):
                 target_name = msg.get('device_name') or msg.get('target')
                 if target_name:
                     await send_to_device(instance_id, target_name, raw)
@@ -636,10 +773,14 @@ async def ws_handler(websocket):
                 if msg.get('type') == 'exec':
                     target_key = f"{instance_id}:{msg.get('device_name', '')}"
                     target = device_conns.get(target_key)
+                    known_keys = list(device_conns.keys())
+                    print(f"[{ts()}] [relay] exec → target_key={target_key!r} found={target is not None} known={known_keys}")
                     if target:
                         try:
                             await target['ws'].send(raw)
+                            print(f"[{ts()}] [relay] exec forwarded to {msg.get('device_name')}")
                         except Exception as e:
+                            print(f"[{ts()}] [relay] exec forward error: {e}")
                             # Device disconnected; notify browser
                             err = json.dumps({
                                 'type': 'result',
@@ -651,6 +792,7 @@ async def ws_handler(websocket):
                             except Exception:
                                 pass
                     else:
+                        print(f"[{ts()}] [relay] exec device not found, sending error back")
                         err = json.dumps({
                             'type': 'result',
                             'req_id': msg.get('req_id', ''),
@@ -675,6 +817,7 @@ async def ws_handler(websocket):
 
                 # Forward result to all browsers
                 if msg.get('type') == 'result':
+                    print(f"[{ts()}] [relay] result from device → browsers (req_id={msg.get('req_id','')[:12]}...)")
                     await send_to_browsers(instance_id, raw)
 
     except websockets.exceptions.ConnectionClosed:
@@ -736,8 +879,21 @@ async def main():
     load_tokens()
 
     # HTTP server
-    app = web.Application()
+    @web.middleware
+    async def cors_middleware(request, handler):
+        if request.method == 'OPTIONS':
+            return web.Response(headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type',
+            })
+        response = await handler(request)
+        response.headers.setdefault('Access-Control-Allow-Origin', '*')
+        return response
+
+    app = web.Application(middlewares=[cors_middleware])
     app.router.add_post('/pair/create', handle_pair_create)
+    app.router.add_get('/pair/{code}/ps1', handle_pair_get_ps1)
     app.router.add_get('/pair/{code}', handle_pair_get)
     app.router.add_get('/update', handle_update)
     app.router.add_get('/bip39', handle_bip39)

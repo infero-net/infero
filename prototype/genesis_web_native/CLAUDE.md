@@ -25,7 +25,7 @@ Genesis (Infero) v0.1 — a local-first digital life engine. Split-screen web ap
 - `loop()` — orchestrates the cycle; continues on `/self_continue`, stops on `/call_for_human`
 
 **Device Relay (`../device_relay/relay.py`):**
-- WebSocket relay that connects the browser to external devices (macOS, Linux shells, iOS shortcuts)
+- WebSocket relay that connects the browser to external devices (macOS, Linux, Windows shells, iOS shortcuts)
 - HTTP endpoints for pairing; tokens persisted to `tokens.json`
 - `agent.py` — Python agent script delivered to devices on pairing; loaded at relay startup (restart relay to pick up `agent.py` changes)
 - Two independent instances: prod (HTTP 8082 / WS 8083) and dev (HTTP 8087 / WS 8088)
