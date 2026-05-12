@@ -416,6 +416,7 @@ class GenesisWorker:
         lines += f'\n    - Memory: {INFERO_DIR}/beings/{self.being_id}/ — consciousness.txt (auto-saved, field: value), metadata.json, arbitrary files'
         lines += '\n    - Capabilities: persistent processes, file I/O, system access, any language/runtime'
         lines += f'\n    - Exec (MUST use this exact format — wrong format = code never executed):\n/exec shell {DEVICE_NAME}\n```bash\n<command>\n```'
+        lines += f'\n    - Python Exec (runs in agent process — can access agent internals, self-modify):\n/exec python {DEVICE_NAME}\n```python\n# agent = the Agent instance; print() captures output; set result = X for return value\n# trigger(value) wakes from /call_for_trigger; define async def main(): for async code\n```'
         lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
         lines += f'\n    - Trigger: echo "msg" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt to wake from /call_for_trigger. Use in nohup scripts for async callback. E.g.: nohup bash -c \'sleep 3600 && echo "1h timer" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt\' &'
         lines += '\n    - wake_me_up_when(sec): schedule a trigger after N seconds. No automatic watchdog — Being sleeps until triggered.'
@@ -962,6 +963,15 @@ class GenesisWorker:
                 self.consciousness += f"System - [Shell][{device_name}] - Skipped: device is hidden or unknown\n\n"
             else:
                 tasks.append(self._exec_remote_shell(device_name, cmd))
+        # Parse /exec python blocks — runs in agent process (self-modification)
+        for m in re.finditer(r'^/exec python (\S+)\n```(?:python|py)?\n((?:(?!\n```).)*)\n```\n', text, re.MULTILINE | re.DOTALL):
+            py_device, py_code = m.group(1), m.group(2).strip()
+            if py_device == DEVICE_NAME:
+                tasks.append(self._exec_python(py_code))
+            elif py_device not in self.devices:
+                self.consciousness += f"System - [Python][{py_device}] - Skipped: device is hidden or unknown\n\n"
+            else:
+                tasks.append(self._exec_remote_python(py_device, py_code))
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
@@ -969,6 +979,56 @@ class GenesisWorker:
                     r = f"System - [Error] {r}\n\n"
                 if r:
                     self.consciousness += r
+
+
+    async def _exec_python(self, code):
+        """Execute Python code directly in the agent process."""
+        self._log(f"[{ts()}] [infero] python exec: {code[:80]}")
+        import io, traceback
+        stdout_capture = io.StringIO()
+        _real_print = print
+        try:
+            g = {
+                'agent': self,
+                'asyncio': asyncio,
+                'os': __import__('os'),
+                'json': __import__('json'),
+                '__builtins__': __builtins__,
+                '_print': _real_print,
+                'print': lambda *a, **kw: _real_print(*a, file=stdout_capture, **kw),
+                'trigger': lambda value: self.triggers.put_nowait(str(value)),
+            }
+            exec(code, g)
+            if 'main' in g and asyncio.iscoroutinefunction(g['main']):
+                await g['main']()
+            out = stdout_capture.getvalue()
+            result = g.get('result', None)
+            if result is not None:
+                out += f"\n[Return Value]\n{result}"
+            if not out.strip():
+                out = "[OK - no output]"
+        except Exception:
+            out = f"[Error]\n{traceback.format_exc()}"
+        sysMsg = f"System - [Python][{DEVICE_NAME}] - Result:\n```text\n{out.strip()}\n```\n\n"
+        await self.send_relay({'type': 'exec_display', 'sender': DEVICE_NAME,
+            'payload': encrypt(self.cipher, {'being_id': self.being_id, 'text': sysMsg})})
+        return sysMsg
+
+
+    async def _exec_remote_python(self, device_name, code):
+        """Relay /exec python to a remote shell device's agent process."""
+        self._log(f"[{ts()}] [infero] python exec (remote -> {device_name}): {code[:60]}")
+        req_id = base64.urlsafe_b64encode(os.urandom(12)).decode()
+        payload = encrypt(self.cipher, {'cmd': f'python3 -c """{code}"""'})
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_exec[req_id] = fut
+        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'payload': payload})
+        try:
+            result = await asyncio.wait_for(fut, timeout=35)
+        except asyncio.TimeoutError:
+            result = f"System - [Python][{device_name}] - Timeout (35s)\n\n"
+        self._pending_exec.pop(req_id, None)
+        return result
 
     async def _exec_local_shell(self, cmd):
         self._log(f"[{ts()}] [infero] shell exec (local): {cmd[:60]}")
