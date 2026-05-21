@@ -422,24 +422,6 @@ function onSearchInput() {
     }, 250);
 }
 
-const AUTO_REFRESH_MS = 15000;
-let refreshTimer = null;
-function startAutoRefresh() {
-    stopAutoRefresh();
-    refreshTimer = setInterval(() => {
-        if (document.hidden) return;
-        if (window.scrollY > 200) return;  // user is scrolling — don't yank the list
-        fetchFresh();
-    }, AUTO_REFRESH_MS);
-}
-function stopAutoRefresh() {
-    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-}
-document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopAutoRefresh();
-    else { fetchFresh(); startAutoRefresh(); }
-});
-
 function parseRoute() {
     const m = location.pathname.match(/^\/hub\/([a-zA-Z0-9_.-]+)\/?$/);
     return m ? { mode: 'detail', name: decodeURIComponent(m[1]) } : { mode: 'list' };
@@ -514,7 +496,6 @@ async function loadDetail(name) {
             if (entries.some(e => e.isIntersecting)) loadMore();
         }, { rootMargin: '400px' }).observe(sentinel);
     }
-    startAutoRefresh();
 })();
 </script>
 </body>
