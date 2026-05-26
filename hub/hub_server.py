@@ -607,7 +607,8 @@ async def hub_text(request: Request, q: Optional[str] = None, sort: str = "hot",
     lines = header + [""]
     for s in skills:
         score = int(s.get("score") or 0)
-        stars = "★" * score + "☆" * (5 - score)
+        full, half = score // 2, score % 2
+        stars = "★" * full + ("½" if half else "") + "☆" * (5 - full - half)
         sev = (s.get("severity") or "safe")
         instr = " ".join((s.get("instruction") or "").split())
         if len(instr) > 70:
