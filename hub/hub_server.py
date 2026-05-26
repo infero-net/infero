@@ -30,7 +30,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -593,6 +593,31 @@ async def hub_list(sort: str = "hot", q: Optional[str] = None, limit: int = 5, o
         "offset": offset,
         "skills": [skill_to_dict(r, include_code=True, summary=True) for r in page],
     }
+
+@app.get("/hub/_text", response_class=PlainTextResponse)
+async def hub_text(request: Request, q: Optional[str] = None, sort: str = "hot", limit: int = 30, offset: int = 0):
+    data = await hub_list(sort=sort, q=q, limit=limit, offset=offset)
+    skills, total = data["skills"], data["total"]
+    host = request.headers.get("host", "infero.net")
+    base = f"https://{host}"
+    header = [f"INFERO · skill hub  ·  {total} skills" + (f"  ·  q={q!r}" if q else "") + (f"  ·  sort=new" if sort == "new" else "")]
+    if not skills:
+        header += ["", "(no matches)" if q else "(empty)", "", f"search:  curl '{base}/hub/_text?q=<keyword>'"]
+        return "\n".join(header) + "\n"
+    lines = header + [""]
+    for s in skills:
+        score = int(s.get("score") or 0)
+        stars = "★" * score + "☆" * (5 - score)
+        sev = (s.get("severity") or "safe")
+        instr = " ".join((s.get("instruction") or "").split())
+        if len(instr) > 70:
+            instr = instr[:67] + "..."
+        lines.append(f"  {s['name']:<28} {stars}  {sev:<6}  {instr}")
+    lines += ["", f"detail:  curl {base}/hub/<name>", f"search:  curl '{base}/hub/_text?q=<keyword>'  (also: &sort=new, &limit=N)"]
+    shown = offset + len(skills)
+    if total > shown:
+        lines.append(f"more:    curl '{base}/hub/_text?offset={shown}'")
+    return "\n".join(lines) + "\n"
 
 @app.get("/hub/skill/{name}")
 async def hub_skill(name: str, request: Request):
