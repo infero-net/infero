@@ -1971,6 +1971,32 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
         }
 
+        // --- Default Hub Skills (auto-installed from the Hub on new-Being creation) ---
+        // Names listed here are pulled from the Skill Hub via window.hubInstall the first
+        // time a Being is created (newBeing only — existing Beings are left untouched).
+        // This is the Hub-sourced counterpart to DEFAULT_SKILLS above: edit the list to
+        // curate which community skills every fresh Being boots with. Unknown names just
+        // log a failure and are skipped; ordering is preserved so dependencies can come first.
+        const DEFAULT_HUB_SKILLS = [
+            "web_search_proxy",   // [Yuzu's Fork] Web Search & Read (Proxy Anti-Block Edition)
+        ];
+
+        async function installDefaultHubSkills() {
+            if (!DEFAULT_HUB_SKILLS.length) return;
+            if (typeof window.hubInstall !== "function") {
+                console.warn("[seed-hub] hubInstall unavailable; skipping default hub skills");
+                return;
+            }
+            for (const name of DEFAULT_HUB_SKILLS) {
+                try {
+                    const ok = await window.hubInstall(name);
+                    console.log("[seed-hub]", name, ok ? "installed" : "failed");
+                } catch (e) {
+                    console.error("[seed-hub] install failed:", name, e);
+                }
+            }
+        }
+
         // --- State Management ---
         var currentBeingId = null;
         var consciousness = "";
@@ -2228,6 +2254,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     catch (e) { console.error('[skill] code eval failed:', s.name, e); }
                 }
             } catch (e) { console.error('[newBeing] skill init failed', e); }
+            // Auto-install the curated set of Hub skills into this fresh Being.
+            // Runs after the local defaults are seeded + eval'd so hubInstall/HUB_BASE exist.
+            try { await installDefaultHubSkills(); } catch (e) { console.error('[newBeing] hub skill load failed', e); }
             renderHistory();
             // If remote host is online, handoff new being; otherwise auto-infer locally
             const remoteHost = settings.hostDevice;
