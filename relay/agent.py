@@ -460,6 +460,12 @@ class GenesisWorker:
         if user_input:
             persist_parts.append(user_input)
         self.consciousness += '\n\n'.join(persist_parts) + '\n\n'
+        if user_input:
+            # Human /view lines load images too
+            for m in re.finditer(r'^/view +(\S+) *$', user_input + ('' if user_input.endswith('\n') else '\n'), re.MULTILINE):
+                r = await self._exec_view(m.group(1))
+                if r:
+                    self.consciousness += r
         # Store realtime separately for infer() to use
         self._last_realtime = realtime
 

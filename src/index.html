@@ -94,12 +94,14 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         async function perceive() {
             const env = getPersistentContext();
             const hasUserInput = !!currentUserInput;
+            const userText = currentUserInput;
             const parts = [env];
             if (currentUserInput) { parts.push(currentUserInput); currentUserInput = null; }
             const S = parts.join('\n\n');
             const timeMatch = env.match(/Time:\s*(.+)/);
             if (timeMatch && !hasUserInput) appendMsgUI('timestamp', timeMatch[1].trim());
             await appendConsciousness(S + '\n\n');
+            if (userText) await _execViews(userText);  // human /view lines load images too
             return S;
         }
 
@@ -1054,6 +1056,31 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             color: var(--accent);
             border: 1px solid var(--accent);
         }
+        button.attach {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            border-radius: 6px;
+            padding: 0 10px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button.attach:hover:not(:disabled) {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        button.attach:disabled { cursor: wait; }
+
+        .msg img.view-thumb {
+            display: block;
+            max-width: 200px;
+            max-height: 150px;
+            margin: 6px 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+
         button.send.stop {
             background: transparent;
             color: var(--text-dim);
@@ -1391,6 +1418,8 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
     <div class="left-panel">
         <div id="chat-box"></div>
         <div class="input-area">
+            <input type="file" id="file-input" accept="image/*" style="display:none">
+            <button id="attach-btn" class="attach" title="Attach image">📷</button>
             <textarea id="input" rows="2" placeholder="Enter prompt..."></textarea>
             <button id="send-btn" class="send go">Wake</button>
         </div>
@@ -2493,7 +2522,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     deviceLines += `\n      ${currentBeingId}/{filename} → arbitrary {id, ...} storage`;
                     deviceLines += `\n    - UI: .right-panel #canvas-container > #html-div (living UI, auto-saved) + #main-canvas`;
                     deviceLines += `\n         .left-panel #chat-box + #input + #send-btn`;
-                    deviceLines += `\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; auto-downscaled to ≤1536px; fades only when compression archives it). ref = IndexedDB key (record .value/.text/.data/.image holding a data URL, base64, or Blob) or a fetchable URL (use /api/proxy?url={url} for CORS).`;
+                    deviceLines += `\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; auto-downscaled to ≤1536px; fades only when compression archives it). ref = IndexedDB key (record .value/.text/.data/.image holding a data URL, base64, or Blob) or a fetchable URL (use /api/proxy?url={url} for CORS). The human can attach images too (📷/paste) — they arrive as /view lines referencing ${currentBeingId}/uploads/* keys.`;
                 }
                 deviceLines += `\n    - Canvas: ${Math.round(w)}×${Math.round(h)}px | Vision: ${visionInfo}`;
                 deviceLines += `\n    - Capabilities: DOM/UI, canvas/WebGL, fetch (/api/proxy?url={url} — transparent CORS proxy, returns raw response; use r.jina.ai/{url} to read web pages as plain text), IndexedDB, FileSystem API, Pyodide, WASM, Speech (neural TTS APIs preferred; WebSpeech as fallback), MediaDevices(camera, mic)`;
@@ -2669,6 +2698,19 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         }
         _statusInterval = setInterval(() => { _statusFlip = !_statusFlip; renderStatus(); }, 3000);
 
+        async function _hydrateViewThumbs(div) {
+            for (const img of div.querySelectorAll('img.view-thumb[data-view-key]')) {
+                const key = decodeURIComponent(img.dataset.viewKey);
+                const rec = await DB.get(key).catch(() => null);
+                if (rec && typeof rec.value === 'string') {
+                    img.src = `data:${rec.media_type || 'image/jpeg'};base64,${rec.value}`;
+                    img.removeAttribute('data-view-key');
+                } else {
+                    img.replaceWith(document.createTextNode(`<<<IMAGE:${key}>>>`));
+                }
+            }
+        }
+
         function appendMsgUI(role, text) {
             if (text === "System - [Auto] - Please continue.") return null;
             const div = document.createElement('div');
@@ -2679,7 +2721,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 div.textContent = text;
             } else {
                 div.className = `msg ${role}`;
-                div.innerHTML = marked.parse(text);
+                const withThumbs = text.replace(IMG_MARKER_RE, (_, k) => `<img class="view-thumb" data-view-key="${encodeURIComponent(k)}">`);
+                div.innerHTML = marked.parse(withThumbs);
+                if (withThumbs !== text) _hydrateViewThumbs(div);
                 if (role === 'user') {
                     div.dataset.userText = text;
                     div.style.cursor = 'pointer';
@@ -4024,6 +4068,39 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 sendMessage();
             }
         };
+
+        const attachBtn = document.getElementById('attach-btn');
+        const fileInput = document.getElementById('file-input');
+        attachBtn.onclick = () => fileInput.click();
+        fileInput.onchange = (e) => {
+            if (e.target.files.length) { storeUpload(e.target.files[0]); e.target.value = ''; }
+        };
+        input.addEventListener('paste', (e) => {
+            for (const item of e.clipboardData?.items || []) {
+                if (item.type.startsWith('image/')) {
+                    storeUpload(item.getAsFile());
+                    e.preventDefault();
+                    return;
+                }
+            }
+        });
+
+        async function storeUpload(file) {
+            if (!file || !file.type.startsWith('image/')) return;
+            attachBtn.textContent = '⏳'; attachBtn.disabled = true;
+            try {
+                const safe = (file.name || 'pasted.png').replace(/[^\w.-]/g, '_');
+                const key = `${currentBeingId}/uploads/${Date.now()}_${safe}`;
+                await DB.put({ id: key, value: file });
+                input.value += (input.value && !input.value.endsWith('\n') ? '\n' : '') + `/view ${key}\n`;
+                input.focus();
+                updateSendBtn();
+            } catch (e) {
+                alert('Attach failed: ' + e.message);
+            } finally {
+                attachBtn.textContent = '📷'; attachBtn.disabled = false;
+            }
+        }
 
         // Boot
         let autoInferTimer = null;
