@@ -821,11 +821,16 @@ class GenesisWorker:
                 'stream': True,
                 'stop_sequences': stop
             }
+            adaptive = self.llm_settings.get('thinking_mode') == 'adaptive'
             if thinking:
-                payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
-                payload['temperature'] = 1
+                if adaptive:
+                    payload['thinking'] = {'type': 'adaptive'}
+                    payload['output_config'] = {'effort': 'high'}
+                else:
+                    payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
+                    payload['temperature'] = 1
                 payload['max_tokens'] = 16000
-            else:
+            elif not adaptive:
                 payload['temperature'] = 0.7
             return payload
 
