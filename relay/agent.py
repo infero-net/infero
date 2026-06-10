@@ -1,4 +1,4 @@
-import asyncio, json, subprocess, base64, hashlib, os, sys, socket, re, gzip, time
+import asyncio, json, subprocess, base64, hashlib, os, sys, socket, re, gzip, time, mimetypes
 from datetime import datetime
 import aiohttp
 
@@ -418,6 +418,7 @@ class GenesisWorker:
         lines += f'\n    - Exec (MUST use this exact format — wrong format = code never executed):\n/exec shell {DEVICE_NAME}\n```bash\n<command>\n```'
         lines += f'\n    - Python Exec (runs in agent process — can access agent internals, self-modify):\n/exec python {DEVICE_NAME}\n```python\n# agent = the Agent instance; print() captures output; set result = X for return value\n# trigger(value) wakes from /call_for_trigger; define async def main(): for async code\n```'
         lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
+        lines += '\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; ≤5MB, jpeg/png/gif/webp; fades only when compression archives it). ref = local file path or http(s) URL.'
         lines += f'\n    - Trigger: echo "msg" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt to wake from /call_for_trigger. Use in nohup scripts for async callback. E.g.: nohup bash -c \'sleep 3600 && echo "1h timer" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt\' &'
         lines += '\n    - wake_me_up_when(sec): schedule a trigger after N seconds. No automatic watchdog — Being sleeps until triggered.'
         # Other devices
@@ -804,13 +805,22 @@ class GenesisWorker:
             history = ''.join(turns[:-1]) if len(turns) > 1 else ''
             latest = turns[-1] if turns else ''
 
+            def to_anthropic(b):
+                if 'text' in b:
+                    return {'type': 'text', 'text': b['text']}
+                return {'type': 'image', 'source': {'type': 'base64', 'media_type': b['media_type'], 'data': b['data']}}
+
             user_content = []
             if stable_head:
                 user_content.append({'type': 'text', 'text': stable_head, 'cache_control': {'type': 'ephemeral'}})
-            if history:
-                user_content.append({'type': 'text', 'text': history})
-            if latest:
-                user_content.append({'type': 'text', 'text': latest, 'cache_control': {'type': 'ephemeral'}})
+            for b in self._split_multimodal(history):
+                user_content.append(to_anthropic(b))
+            latest_blocks = self._split_multimodal(latest)
+            for i, b in enumerate(latest_blocks):
+                blk = to_anthropic(b)
+                if i == len(latest_blocks) - 1:
+                    blk['cache_control'] = {'type': 'ephemeral'}
+                user_content.append(blk)
             user_content.append({'type': 'text', 'text': '\n\n' + volatile_tail})
 
             payload = {
@@ -835,12 +845,18 @@ class GenesisWorker:
             return payload
 
         if fmt == 'openai':
-            full_text = stable_head + history_text + '\n\n' + volatile_tail
+            oa_content = []
+            for b in self._split_multimodal(stable_head + history_text):
+                if 'text' in b:
+                    oa_content.append({'type': 'text', 'text': b['text']})
+                else:
+                    oa_content.append({'type': 'image_url', 'image_url': {'url': f"data:{b['media_type']};base64,{b['data']}"}})
+            oa_content.append({'type': 'text', 'text': '\n\n' + volatile_tail})
             return {
                 'model': model,
                 'messages': [
                     {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': [{'type': 'text', 'text': full_text}]}
+                    {'role': 'user', 'content': oa_content}
                 ],
                 'stream': True,
                 'temperature': 1 if thinking else 0.7,
@@ -858,7 +874,14 @@ class GenesisWorker:
             'thinkingConfig': {'includeThoughts': True},
             'stopSequences': stop
         }
-        contents = [{'role': 'user', 'parts': [{'text': gemini_buffer + '\n\n' + volatile_tail}]}]
+        gem_parts = []
+        for b in self._split_multimodal(gemini_buffer):
+            if 'text' in b:
+                gem_parts.append({'text': b['text']})
+            else:
+                gem_parts.append({'inlineData': {'mimeType': b['media_type'], 'data': b['data']}})
+        gem_parts.append({'text': '\n\n' + volatile_tail})
+        contents = [{'role': 'user', 'parts': gem_parts}]
         is_infero = bool(self.llm_settings.get('client_id'))
         if cache_name:
             payload = {
@@ -956,6 +979,9 @@ class GenesisWorker:
         if not B_out: return
         text = B_out if B_out.endswith('\n') else B_out + '\n'
         tasks = []
+        # Parse /view lines — image enters consciousness history as an <<<IMAGE:path>>> marker
+        for m in re.finditer(r'^/view +(\S+) *$', text, re.MULTILINE):
+            tasks.append(self._exec_view(m.group(1)))
         # Parse /browser exec and /exec browser blocks
         for m in re.finditer(r'^/(?:browser exec|exec browser)\n```(?:javascript|js)?\n([\s\S]*?)\n```\n', text, re.MULTILINE):
             tasks.append(self._exec_browser(m.group(1).strip()))
@@ -985,6 +1011,64 @@ class GenesisWorker:
                 if r:
                     self.consciousness += r
 
+
+    async def _exec_view(self, ref):
+        """Resolve a /view ref (local file path or URL); copy into vision/, marker into consciousness."""
+        try:
+            if ref.startswith('http://') or ref.startswith('https://'):
+                async with aiohttp.ClientSession(trust_env=True) as s:
+                    async with s.get(ref, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                        if r.status != 200:
+                            return f"System - [View] {ref} → failed: HTTP {r.status}\n\n"
+                        data = await r.read()
+                mime = ''
+            else:
+                path = os.path.expanduser(ref)
+                if not os.path.isfile(path):
+                    return f"System - [View] {ref} → failed: file not found\n\n"
+                with open(path, 'rb') as f:
+                    data = f.read()
+                mime = mimetypes.guess_type(path)[0] or ''
+            if data[:3] == b'\xff\xd8\xff': mime = 'image/jpeg'
+            elif data[:4] == b'\x89PNG': mime = 'image/png'
+            elif data[:4] == b'GIF8': mime = 'image/gif'
+            elif data[:4] == b'RIFF' and data[8:12] == b'WEBP': mime = 'image/webp'
+            if mime not in ('image/jpeg', 'image/png', 'image/gif', 'image/webp'):
+                return f"System - [View] {ref} → failed: unsupported type '{mime or 'unknown'}' (need jpeg/png/gif/webp)\n\n"
+            if len(data) > 5 * 1024 * 1024:
+                return f"System - [View] {ref} → failed: {len(data) // 1024}KB exceeds 5MB limit (downscale first)\n\n"
+            ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp'}[mime]
+            vision_dir = os.path.join(INFERO_DIR, 'beings', self.being_id, 'vision')
+            os.makedirs(vision_dir, exist_ok=True)
+            target = os.path.join(vision_dir, f"{int(time.time() * 1000)}.{ext}")
+            with open(target, 'wb') as f:
+                f.write(data)
+            return (f"System - [View] loaded {ref} ({mime}, {len(data) // 1024}KB) into visual context:\n"
+                    f"<<<IMAGE:{target}>>>\n\n")
+        except Exception as e:
+            return f"System - [View] {ref} → failed: {e}\n\n"
+
+    _IMG_MARKER_RE = re.compile(r'<<<IMAGE:([^>\n]+)>>>')
+
+    def _split_multimodal(self, text):
+        """Split consciousness text on <<<IMAGE:path>>> markers into text/image blocks."""
+        blocks, last = [], 0
+        for m in self._IMG_MARKER_RE.finditer(text):
+            try:
+                with open(m.group(1), 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue  # image gone → marker stays as text
+            if m.start() > last:
+                blocks.append({'text': text[last:m.start()]})
+            blocks.append({'media_type': mimetypes.guess_type(m.group(1))[0] or 'image/jpeg',
+                           'data': base64.b64encode(data).decode()})
+            last = m.end()
+        if last < len(text):
+            blocks.append({'text': text[last:]})
+        if not blocks and text:
+            blocks.append({'text': text})
+        return blocks
 
     async def _exec_python(self, code):
         """Execute Python code directly in the agent process."""

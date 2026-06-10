@@ -371,8 +371,16 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 if (stableHead.length > 0) {
                     userContent.push({ type: 'text', text: stableHead, cache_control: { type: 'ephemeral' } });
                 }
-                if (history) userContent.push({ type: 'text', text: history });
-                if (latest)  userContent.push({ type: 'text', text: latest, cache_control: { type: 'ephemeral' } });
+                const toAnthropic = b => b.text !== undefined
+                    ? { type: 'text', text: b.text }
+                    : { type: 'image', source: { type: 'base64', media_type: b.media_type, data: b.data } };
+                for (const b of await _mmBlocks(history)) userContent.push(toAnthropic(b));
+                const latestBlocks = await _mmBlocks(latest);
+                latestBlocks.forEach((b, i) => {
+                    const blk = toAnthropic(b);
+                    if (i === latestBlocks.length - 1) blk.cache_control = { type: 'ephemeral' };
+                    userContent.push(blk);
+                });
                 userContent.push({ type: 'text', text: '\n\n' + volatileTail });  // volatile, no cache
                 if (canvasImage) userContent.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: canvasImage } });
                 const payload = {
@@ -400,8 +408,10 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             }
 
             if (getActiveFormat() === 'openai') {
-                const fullText = stableHead + consciousness + '\n\n' + volatileTail;
-                const userContent = [{ type: 'text', text: fullText }];
+                const userContent = (await _mmBlocks(stableHead + consciousness)).map(b => b.text !== undefined
+                    ? { type: 'text', text: b.text }
+                    : { type: 'image_url', image_url: { url: `data:${b.media_type};base64,${b.data}` } });
+                userContent.push({ type: 'text', text: '\n\n' + volatileTail });
                 if (canvasImage) userContent.push({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + canvasImage } });
                 const adaptiveOA = MODEL_LIST[settings.model]?.thinkingMode === 'adaptive';
                 const payload = {
@@ -434,7 +444,10 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             const geminiBuffer = cacheName ? consciousness.slice(cachedLength) : (stableHead + consciousness);
             const contents = [
                 { role: 'user', parts: [
-                    { text: geminiBuffer + '\n\n' + volatileTail },
+                    ...(await _mmBlocks(geminiBuffer)).map(b => b.text !== undefined
+                        ? { text: b.text }
+                        : { inlineData: { mimeType: b.media_type, data: b.data } }),
+                    { text: '\n\n' + volatileTail },
                     ...(canvasImage ? [{ inlineData: { mimeType: 'image/jpeg', data: canvasImage } }] : []),
                 ]},
             ];
@@ -501,8 +514,106 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             return sysMsg;
         }
 
+        const VIEW_MAX_DIM = 1536;
+
+        function _viewSniff(b64) {
+            if (b64.startsWith('/9j/')) return 'image/jpeg';
+            if (b64.startsWith('iVBOR')) return 'image/png';
+            if (b64.startsWith('R0lGOD')) return 'image/gif';
+            if (b64.startsWith('UklGR')) return 'image/webp';
+            return null;
+        }
+
+        async function _viewNormalize(mediaType, b64) {
+            const img = new Image();
+            await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('not decodable as image')); img.src = `data:${mediaType};base64,${b64}`; });
+            const w = img.naturalWidth, h = img.naturalHeight;
+            const accepted = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mediaType);
+            if (accepted && Math.max(w, h) <= VIEW_MAX_DIM) return { media_type: mediaType, data: b64 };
+            const scale = Math.min(1, VIEW_MAX_DIM / Math.max(w, h, 1));
+            const c = document.createElement('canvas');
+            c.width = Math.max(1, Math.round(w * scale));
+            c.height = Math.max(1, Math.round(h * scale));
+            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+            return { media_type: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] };
+        }
+
+        async function _viewFromBlob(blob) {
+            if (blob.type && !blob.type.startsWith('image/')) throw new Error(`not an image (${blob.type})`);
+            const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
+            const m = dataUrl.match(/^data:([^;,]*);base64,([\s\S]+)$/);
+            if (!m) throw new Error('unreadable blob');
+            return _viewNormalize(_viewSniff(m[2]) || m[1] || 'image/png', m[2]);
+        }
+
+        async function _resolveViewRef(ref) {
+            if (/^https?:\/\//.test(ref) || ref.startsWith('/')) {
+                const r = await fetch(ref);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return _viewFromBlob(await r.blob());
+            }
+            const rec = await DB.get(ref);
+            if (!rec) throw new Error('IndexedDB key not found');
+            const v = rec.value ?? rec.text ?? rec.data ?? rec.image ?? null;
+            if (v instanceof Blob) return _viewFromBlob(v);
+            if (typeof v === 'string') {
+                const dm = v.match(/^data:([^;,]*);base64,([\s\S]+)$/);
+                if (dm) return _viewNormalize(_viewSniff(dm[2]) || dm[1], dm[2]);
+                const b64 = v.replace(/\s+/g, '');
+                const sniffed = _viewSniff(b64);
+                if (!sniffed) throw new Error('record value is not image data (need data URL / base64 jpeg|png|gif|webp / Blob in .value/.text/.data/.image)');
+                return _viewNormalize(sniffed, b64);
+            }
+            throw new Error('record has no usable image field (.value/.text/.data/.image)');
+        }
+
+        const IMG_MARKER_RE = /<<<IMAGE:([^>\n]+)>>>/g;
+
+        async function _mmBlocks(text) {
+            if (!text) return [];
+            const blocks = [];
+            let last = 0;
+            for (const m of text.matchAll(IMG_MARKER_RE)) {
+                const rec = await DB.get(m[1]).catch(() => null);
+                if (!rec || typeof rec.value !== 'string') continue;  // image gone → marker stays as text
+                if (m.index > last) blocks.push({ text: text.slice(last, m.index) });
+                blocks.push({ media_type: rec.media_type || 'image/jpeg', data: rec.value });
+                last = m.index + m[0].length;
+            }
+            if (last < text.length) blocks.push({ text: text.slice(last) });
+            if (!blocks.length) blocks.push({ text });
+            return blocks;
+        }
+
+        async function _execViews(B_out) {
+            const text = B_out.endsWith('\n') ? B_out : B_out + '\n';
+            const matches = [...text.matchAll(/^\/view +(\S+) *$/gm)];
+            if (!matches.length) return;
+            const supportsVision = MODEL_LIST[settings.model]?.vision !== false;
+            for (const m of matches) {
+                const ref = m[1];
+                let sysMsg;
+                if (!supportsVision) {
+                    sysMsg = `System - [View] ${ref} → skipped: current model does not support image input`;
+                } else {
+                    try {
+                        const im = await _resolveViewRef(ref);
+                        const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }[im.media_type] || 'jpg';
+                        const key = `${currentBeingId}/vision/${Date.now()}.${ext}`;
+                        await DB.put({ id: key, value: im.data, media_type: im.media_type });
+                        sysMsg = `System - [View] loaded ${ref} (${im.media_type}, ${Math.round(im.data.length * 0.75 / 1024)}KB) into visual context:\n<<<IMAGE:${key}>>>`;
+                    } catch (e) {
+                        sysMsg = `System - [View] ${ref} → failed: ${e.message}`;
+                    }
+                }
+                appendMsgUI('system', sysMsg);
+                await appendConsciousness(sysMsg + '\n\n');
+            }
+        }
+
         async function act(B_out) {
             if (!B_out) return null;
+            await _execViews(B_out);
             let done = false;
             const combined = Promise.all([_execCode(B_out), _execShellBlocks(B_out)])
                 .then(([b, s]) => { done = true; return [b, s].filter(Boolean).join('\n\n') || null; });
@@ -2382,6 +2493,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     deviceLines += `\n      ${currentBeingId}/{filename} → arbitrary {id, ...} storage`;
                     deviceLines += `\n    - UI: .right-panel #canvas-container > #html-div (living UI, auto-saved) + #main-canvas`;
                     deviceLines += `\n         .left-panel #chat-box + #input + #send-btn`;
+                    deviceLines += `\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; auto-downscaled to ≤1536px; fades only when compression archives it). ref = IndexedDB key (record .value/.text/.data/.image holding a data URL, base64, or Blob) or a fetchable URL (use /api/proxy?url={url} for CORS).`;
                 }
                 deviceLines += `\n    - Canvas: ${Math.round(w)}×${Math.round(h)}px | Vision: ${visionInfo}`;
                 deviceLines += `\n    - Capabilities: DOM/UI, canvas/WebGL, fetch (/api/proxy?url={url} — transparent CORS proxy, returns raw response; use r.jina.ai/{url} to read web pages as plain text), IndexedDB, FileSystem API, Pyodide, WASM, Speech (neural TTS APIs preferred; WebSpeech as fallback), MediaDevices(camera, mic)`;
