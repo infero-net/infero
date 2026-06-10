@@ -1271,6 +1271,34 @@ async def connect_instance(cfg):
                         payload = encrypt(cipher, {"stdout": "", "stderr": str(e), "exit_code": -1})
                     await ws.send(json.dumps({"type": "result", "req_id": req_id, "payload": payload}))
 
+                async def handle_file_read(payload_raw):
+                    req_id = ''
+                    try:
+                        content = decrypt(cipher, payload_raw)
+                        req_id = content.get('req_id', '')
+                        path = os.path.expanduser(content.get('path', ''))
+                        log(cfg['relay_ws'], f"[{ts()}] [infero] file_read ({iid}): {path}")
+                        if not os.path.isfile(path):
+                            raise FileNotFoundError(f'file not found: {path}')
+                        size = os.path.getsize(path)
+                        if size > 5 * 1024 * 1024:
+                            raise ValueError(f'{size // 1024}KB exceeds 5MB limit')
+                        with open(path, 'rb') as f:
+                            b64 = base64.b64encode(f.read()).decode()
+                        mime = mimetypes.guess_type(path)[0] or ''
+                        chunk = 512 * 1024
+                        parts = [b64[i:i + chunk] for i in range(0, len(b64), chunk)] or ['']
+                        for i, c in enumerate(parts):
+                            await ws.send(json.dumps({
+                                'type': 'file_read_result', 'req_id': req_id, 'seq': i, 'total': len(parts),
+                                'sender': DEVICE_NAME,
+                                'payload': encrypt(cipher, {'data': c, 'mime': mime})}))
+                    except Exception as e:
+                        await ws.send(json.dumps({
+                            'type': 'file_read_result', 'req_id': req_id, 'seq': 0, 'total': 1,
+                            'sender': DEVICE_NAME,
+                            'payload': encrypt(cipher, {'error': str(e)})}))
+
                 workers = {}  # being_id -> GenesisWorker
                 # Cache the last settings_update payload at connection scope so freshly-created
                 # workers (e.g. lazy-init on first user_input) start with the browser's current
@@ -1293,6 +1321,8 @@ async def connect_instance(cfg):
                         log(cfg['relay_ws'], f"[{ts()}] [infero] MSG_RAW type={mtype} being={being_id} keys={list(msg.keys())}")
                     if mtype == 'exec':
                         asyncio.create_task(handle_exec(msg['req_id'], msg['payload']))
+                    elif mtype == 'file_read':
+                        asyncio.create_task(handle_file_read(msg['payload']))
                     elif mtype == 'loop_handoff':
                         w = get_worker(being_id)
                         log(cfg['relay_ws'], f"[{ts()}] [infero] MSG loop_handoff for being={being_id}, worker={w is not None}")

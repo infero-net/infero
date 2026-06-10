@@ -549,6 +549,10 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         }
 
         async function _resolveViewRef(ref) {
+            const dref = ref.match(/^([\w-]+):(.+)$/);
+            if (dref && settings.devices?.[dref[1]]) {
+                return _viewFromBlob(await relayFileRead(dref[1], dref[2]));
+            }
             if (/^https?:\/\//.test(ref) || ref.startsWith('/')) {
                 const r = await fetch(ref);
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2522,7 +2526,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     deviceLines += `\n      ${currentBeingId}/{filename} → arbitrary {id, ...} storage`;
                     deviceLines += `\n    - UI: .right-panel #canvas-container > #html-div (living UI, auto-saved) + #main-canvas`;
                     deviceLines += `\n         .left-panel #chat-box + #input + #send-btn`;
-                    deviceLines += `\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; auto-downscaled to ≤1536px; fades only when compression archives it). ref = IndexedDB key (record .value/.text/.data/.image holding a data URL, base64, or Blob) or a fetchable URL (use /api/proxy?url={url} for CORS). The human can attach images too (📷/paste) — they arrive as /view lines referencing ${currentBeingId}/uploads/* keys.`;
+                    deviceLines += `\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; auto-downscaled to ≤1536px; fades only when compression archives it). ref = IndexedDB key (record .value/.text/.data/.image holding a data URL, base64, or Blob), a fetchable URL (use /api/proxy?url={url} for CORS), or <device>:<path> to read a file from an online shell device (≤5MB). The human can attach images too (📷/paste) — they arrive as /view lines referencing ${currentBeingId}/uploads/* keys.`;
                 }
                 deviceLines += `\n    - Canvas: ${Math.round(w)}×${Math.round(h)}px | Vision: ${visionInfo}`;
                 deviceLines += `\n    - Capabilities: DOM/UI, canvas/WebGL, fetch (/api/proxy?url={url} — transparent CORS proxy, returns raw response; use r.jina.ai/{url} to read web pages as plain text), IndexedDB, FileSystem API, Pyodide, WASM, Speech (neural TTS APIs preferred; WebSpeech as fallback), MediaDevices(camera, mic)`;
@@ -3199,6 +3203,21 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
         }
 
+        var _pendingFileReads = {};
+        function relayFileRead(deviceName, path, timeoutMs = 30000) {
+            return new Promise((resolve, reject) => {
+                if (!settings.devices?.[deviceName]?.online) return reject(new Error(`device offline: ${deviceName}`));
+                const req_id = crypto.randomUUID();
+                const timer = setTimeout(() => { delete _pendingFileReads[req_id]; reject(new Error(`file_read timeout (${timeoutMs / 1000}s): ${deviceName}:${path}`)); }, timeoutMs);
+                _pendingFileReads[req_id] = {
+                    chunks: [], got: 0, mime: '',
+                    resolve: v => { clearTimeout(timer); resolve(v); },
+                    reject: e => { clearTimeout(timer); reject(e); }
+                };
+                relayEncSend(deviceName, 'file_read', { path, req_id });
+            });
+        }
+
         async function relayDec(msg) {
             const sender = msg.sender || msg.device_name;
             const info = settings.devices?.[sender];
@@ -3487,6 +3506,29 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 const { content } = dec;
                 if (content.being_id && content.being_id !== currentBeingId) return;
                 if (content.text) appendMsgUI('system', content.text.trim());
+            }
+
+            if (msg.type === 'file_read_result') {
+                const p = _pendingFileReads[msg.req_id];
+                if (!p) return;
+                const dec = await relayDec(msg);
+                if (!dec) return;
+                if (dec.content.error) {
+                    delete _pendingFileReads[msg.req_id];
+                    p.reject(new Error(dec.content.error));
+                    return;
+                }
+                p.chunks[msg.seq] = dec.content.data;
+                p.mime = dec.content.mime || p.mime;
+                p.got++;
+                if (p.got === msg.total) {
+                    delete _pendingFileReads[msg.req_id];
+                    try {
+                        const bytes = Uint8Array.from(atob(p.chunks.join('')), c => c.charCodeAt(0));
+                        p.resolve(new Blob([bytes], { type: p.mime }));
+                    } catch (e) { p.reject(e); }
+                }
+                return;
             }
 
             if (msg.type === 'request_device_data') {
