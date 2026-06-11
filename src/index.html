@@ -77,10 +77,12 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                     : e._kind === 'reset' ? 'Connection Reset'
                     : e._kind === 'unreachable' ? 'Network Unreachable'
                     : e._kind === 'http' ? `HTTP ${e._status}`
+                    : e._kind === 'config' ? 'Config'
                     : 'Error';
                 const errMsg = `System - [${label}] ${e.message}`;
                 appendMsgUI('system', errMsg);
                 await appendConsciousness(errMsg + '\n\n');
+                if (e._kind === 'config') return;  // settings problem — retrying won't help
                 currentAbortController = new AbortController();
                 await new Promise(r => {
                     const t = setTimeout(r, 15000);
@@ -134,6 +136,11 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const body = JSON.stringify(await buildPayload());
                 if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
                 const token = getActiveToken();
+                if (settings.provider === 'infero' && getActiveFormat() === 'anthropic' && token === INFERO_KEY) {
+                    const err = new Error(`${settings.model} is not served by the infero quota. Open Settings, set From to Anthropic (or OpenRouter) and paste your own API token.`);
+                    err._kind = 'config';
+                    throw err;
+                }
                 const headers = { 'Content-Type': 'application/json' };
                 if (settings.provider === 'anthropic') {
                     headers['x-api-key'] = token;
@@ -1509,7 +1516,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         };
         const _isLocalHost = !location.host || location.host.startsWith('localhost') || location.host.startsWith('127.0.0.1');
         const _inferoOrigin = _isLocalHost ? 'https://infero.net' : location.origin;
-        const INFERO_ENDPOINTS = { gemini: _inferoOrigin + '/api/relay', openai: _inferoOrigin + '/api/v1/chat/completions' };
+        const INFERO_ENDPOINTS = { gemini: _inferoOrigin + '/api/relay', openai: _inferoOrigin + '/api/v1/chat/completions', anthropic: _inferoOrigin + '/api/v1/messages' };
         const SETTINGS_DEFAULTS = {
             model: 'gemini-3.1-pro',
             customModel: '',
