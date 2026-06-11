@@ -136,13 +136,13 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const body = JSON.stringify(await buildPayload());
                 if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
                 const token = getActiveToken();
-                if (getActiveFormat() === 'anthropic' && !token) {
-                    const err = new Error(`${settings.model} needs your Anthropic API token: Settings → From: Anthropic → paste token. (Requests go directly from your browser to api.anthropic.com.)`);
+                if (settings.provider === 'infero' && getActiveFormat() === 'anthropic' && token === INFERO_KEY) {
+                    const err = new Error(`${settings.model} is not served by the infero quota. Open Settings, set From to Anthropic (or OpenRouter) and paste your own API token.`);
                     err._kind = 'config';
                     throw err;
                 }
                 const headers = { 'Content-Type': 'application/json' };
-                if (settings.provider === 'anthropic' || (settings.provider === 'infero' && getActiveFormat() === 'anthropic')) {
+                if (settings.provider === 'anthropic') {
                     headers['x-api-key'] = token;
                     headers['anthropic-version'] = '2023-06-01';
                     headers['anthropic-dangerous-direct-browser-access'] = 'true';
@@ -151,7 +151,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 } else {
                     headers['Authorization'] = 'Bearer ' + token;
                 }
-                if (settings.provider === 'infero' && getActiveFormat() !== 'anthropic') headers['X-Client-ID'] = CLIENT_ID;
+                if (settings.provider === 'infero') headers['X-Client-ID'] = CLIENT_ID;
 
                 // Wait-for-headers timeout (does not bound the streaming phase)
                 const HEADERS_TIMEOUT_MS = 90000;
@@ -1516,7 +1516,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         };
         const _isLocalHost = !location.host || location.host.startsWith('localhost') || location.host.startsWith('127.0.0.1');
         const _inferoOrigin = _isLocalHost ? 'https://infero.net' : location.origin;
-        const INFERO_ENDPOINTS = { gemini: _inferoOrigin + '/api/relay', openai: _inferoOrigin + '/api/v1/chat/completions' };
+        const INFERO_ENDPOINTS = { gemini: _inferoOrigin + '/api/relay', openai: _inferoOrigin + '/api/v1/chat/completions', anthropic: _inferoOrigin + '/api/v1/messages' };
         const SETTINGS_DEFAULTS = {
             model: 'gemini-3.1-pro',
             customModel: '',
@@ -1559,11 +1559,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             const p = PROVIDERS[settings.provider];
             if (!p) return INFERO_ENDPOINTS.gemini;
             if (settings.provider === 'custom') return settings.apiEndpoint;
-            if (settings.provider === 'infero') {
-                // anthropic supports direct browser access — no proxy needed, just the user's own token
-                if (getActiveFormat() === 'anthropic') return PROVIDERS.anthropic.endpoint;
-                return INFERO_ENDPOINTS[getActiveFormat()] || INFERO_ENDPOINTS.gemini;
-            }
+            if (settings.provider === 'infero') return INFERO_ENDPOINTS[getActiveFormat()] || INFERO_ENDPOINTS.gemini;
             // Direct gemini-format providers (e.g. google) need full streaming URL with model path
             if (getActiveFormat() === 'gemini' && p.endpoint) {
                 const base = p.endpoint.replace(/\/$/, '');
@@ -1572,8 +1568,6 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             return p.endpoint;
         }
         function getActiveToken() {
-            if (getActiveFormat() === 'anthropic' && (settings.provider === 'infero' || settings.provider === 'anthropic'))
-                return settings.tokens?.anthropic || '';  // INFERO_KEY is never a valid anthropic key
             return settings.tokens?.[settings.provider] || INFERO_KEY;
         }
 
