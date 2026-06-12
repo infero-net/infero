@@ -619,7 +619,6 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
 
         async function act(B_out) {
             if (!B_out) return null;
-            await _execViews(B_out);
             let done = false;
             const combined = Promise.all([_execCode(B_out), _execShellBlocks(B_out)])
                 .then(([b, s]) => { done = true; return [b, s].filter(Boolean).join('\n\n') || null; });
@@ -629,6 +628,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 appendMsgUI('system', msg);
                 await appendConsciousness(msg + '\n\n');
             }
+            await _execViews(B_out);  // after exec, so a /view can reference files exec just produced
             return result;
         }
 

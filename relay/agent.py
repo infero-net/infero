@@ -985,9 +985,6 @@ class GenesisWorker:
         if not B_out: return
         text = B_out if B_out.endswith('\n') else B_out + '\n'
         tasks = []
-        # Parse /view lines — image enters consciousness history as an <<<IMAGE:path>>> marker
-        for m in re.finditer(r'^/view +(\S+) *$', text, re.MULTILINE):
-            tasks.append(self._exec_view(m.group(1)))
         # Parse /browser exec and /exec browser blocks
         for m in re.finditer(r'^/(?:browser exec|exec browser)\n```(?:javascript|js)?\n([\s\S]*?)\n```\n', text, re.MULTILINE):
             tasks.append(self._exec_browser(m.group(1).strip()))
@@ -1009,13 +1006,18 @@ class GenesisWorker:
                 self.consciousness += f"System - [Python][{py_device}] - Skipped: device is hidden or unknown\n\n"
             else:
                 tasks.append(self._exec_remote_python(py_device, py_code))
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
+        async def _flush(ts):
+            for r in await asyncio.gather(*ts, return_exceptions=True):
                 if isinstance(r, Exception):
                     r = f"System - [Error] {r}\n\n"
                 if r:
                     self.consciousness += r
+        if tasks:
+            await _flush(tasks)
+        # /view lines run after exec completes, so a view can reference files exec just produced
+        view_tasks = [self._exec_view(m.group(1)) for m in re.finditer(r'^/view +(\S+) *$', text, re.MULTILINE)]
+        if view_tasks:
+            await _flush(view_tasks)
 
 
     async def _exec_view(self, ref):
