@@ -396,7 +396,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const adaptive = MODEL_LIST[settings.model]?.thinkingMode === 'adaptive';
                 if (settings.thinking) {
                     if (adaptive) {
-                        payload.thinking = { type: 'adaptive' };
+                        payload.thinking = { type: 'adaptive', display: 'summarized' };
                         payload.output_config = { effort: 'high' };
                     } else {
                         payload.thinking = { type: 'enabled', budget_tokens: 10000 };
@@ -428,7 +428,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 };
                 if (settings.thinking) {
                     if (adaptiveOA) {
-                        payload.thinking = { type: 'adaptive' };
+                        payload.thinking = { type: 'adaptive', display: 'summarized' };
                         payload.output_config = { effort: 'high' };
                     } else {
                         payload.thinking = { type: 'enabled', budget_tokens: 10000 };

@@ -840,7 +840,7 @@ class GenesisWorker:
             adaptive = self.llm_settings.get('thinking_mode') == 'adaptive'
             if thinking:
                 if adaptive:
-                    payload['thinking'] = {'type': 'adaptive'}
+                    payload['thinking'] = {'type': 'adaptive', 'display': 'summarized'}
                     payload['output_config'] = {'effort': 'high'}
                 else:
                     payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
