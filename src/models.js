@@ -52,6 +52,8 @@ window.MODELS = {
       "zhipu": "glm-5", "openrouter": "z-ai/glm-5" }},
     { "name": "glm-5.1", "format": "openai", "maxContext": 131072, "vision": true, "from": {
       "dashscope": "glm-5.1", "openrouter": "z-ai/glm-5.1" }},
+    { "name": "glm-5.2", "format": "openai", "maxContext": 131072, "vision": true, "from": {
+      "zhipu": "glm-5.2", "dashscope": "glm-5.2", "openrouter": "z-ai/glm-5.2" }},
     { "name": "kimi-k2.5", "format": "openai", "maxContext": 256000, "vision": true, "from": {
       "moonshot": "kimi-k2.5", "openrouter": "moonshotai/kimi-k2.5", "dashscope": "kimi-k2.5" }},
     { "name": "MiniMax-M2.5", "format": "openai", "maxContext": 256000, "vision": false, "from": {
