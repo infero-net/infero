@@ -3321,7 +3321,13 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 if (_wasDeleted) window._removedDevices.delete(device_name);
                 const note = `System - [Device] - ${device_name} ${_wasDeleted ? 'deleted' : (online ? 'is now online' : 'is now offline')}`;
                 // Only emit chat noise for KNOWN paired devices; unregistered ones surface via the orange dot in Settings.
-                if (settings.devices[device_name]) appendMsgUI('system', note);
+                // Announce only real transitions: relay-WS reconnects silently reset .online=false,
+                // so compare against the last *announced* status, not the reset value.
+                if (!window._devAnnounced) window._devAnnounced = {};
+                if (settings.devices[device_name] && window._devAnnounced[device_name] !== online) {
+                    window._devAnnounced[device_name] = online;
+                    appendMsgUI('system', note);
+                }
                 // Don't write device status to consciousness — reconnection noise pollutes AI context
                 // Auto takeover if core loop host went offline
                 if (!online && settings.hostDevice === device_name) {
