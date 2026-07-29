@@ -3356,8 +3356,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                         }, 3000);
                     }
                 }
-                // Host device is online — sync consciousness first, then handoff if needed
-                if (online && settings.hostDevice === device_name && !window._remoteLoopRunning) {
+                // Host device is online — sync consciousness first, then handoff if needed.
+                // No _remoteLoopRunning guard: output streamed while our WS was down only
+                // exists on the device; without this sync it never reaches the screen.
+                if (online && settings.hostDevice === device_name) {
                     console.log(`[relay] Host ${device_name} is online, syncing consciousness...`);
                     window._forkPoint = consciousness.length;
                     window._syncThenHandoff = device_name;
@@ -3366,9 +3368,15 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                         setStatus('Syncing...');
                         setTimeout(() => {
                             if (window._syncThenHandoff === device_name) {
-                                console.log(`[relay] Host sync timeout, handing off to re-establish worker`);
                                 window._syncThenHandoff = null;
-                                doHandoff(device_name);
+                                if (window._remoteLoopRunning) {
+                                    // Loop is mid-inference — don't restart the worker, stream will resume
+                                    console.log(`[relay] Host sync timeout but loop running — staying Remote`);
+                                    setStatus('Remote');
+                                } else {
+                                    console.log(`[relay] Host sync timeout, handing off to re-establish worker`);
+                                    doHandoff(device_name);
+                                }
                             }
                         }, 3000);
                     }
@@ -3619,9 +3627,15 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     updateSendBtn();
                 } else if (window._syncThenHandoff === runner) {
                     window._syncThenHandoff = null;
-                    if (changed) {
+                    if (changed && !window._remoteLoopRunning) {
                         console.log(`[relay] Sync done from ${runner}, merged — handing off merged consciousness`);
                         doHandoff(runner);
+                    } else if (changed) {
+                        console.log(`[relay] Sync done from ${runner}, merged — loop running, staying Remote`);
+                        settings.hostDevice = runner;
+                        saveSettingsToStorage(settings);
+                        renderDeviceList();
+                        setStatus('Remote');
                     } else {
                         console.log(`[relay] Sync done from ${runner}, ${remoteConsciousness ? remoteConsciousness.length + ' chars' : 'empty'} — staying in Remote mode`);
                         settings.hostDevice = runner;
