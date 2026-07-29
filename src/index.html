@@ -2864,6 +2864,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     thinking: settings.thinking || false,
                     thinking_mode: MODEL_LIST[settings.model]?.thinkingMode || null,
                     endpoint: getActiveEndpoint(),
+                    compressCfg: MODEL_LIST[settings.model]?.compress || null,
                     system_prompt: SYSTEM_INSTRUCTION,
                     client_id: CLIENT_ID
                 }
@@ -3953,6 +3954,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     thinking: settings.thinking || false,
                     thinking_mode: MODEL_LIST[settings.model]?.thinkingMode || null,
                     endpoint: getActiveEndpoint(),
+                    compressCfg: MODEL_LIST[settings.model]?.compress || null,
                     cache_endpoint: PROVIDERS[settings.provider]?.cacheEndpoint || null,
                     system_prompt: SYSTEM_INSTRUCTION,
                     client_id: CLIENT_ID

@@ -197,7 +197,9 @@ class GenesisWorker:
             with open(st_path, 'r', encoding='utf-8') as f:
                 state = json.load(f)
             self.metadata = state.get('metadata', {})
-            self.llm_settings = state.get('llm_settings', {})
+            # Merge, don't replace: disk state may hold partial keys and must not
+            # clobber a full config seeded by settings_update/handoff.
+            self.llm_settings.update(state.get('llm_settings') or {})
             self.devices = state.get('devices', {})
             self.hidden_devices = set(state.get('hidden_devices', []))
             self._last_prompt_tokens = state.get('last_prompt_tokens', 0)
@@ -210,7 +212,7 @@ class GenesisWorker:
                     self.metadata = json.load(f)
             if os.path.exists(s_path):
                 with open(s_path, 'r', encoding='utf-8') as f:
-                    self.llm_settings = json.load(f)
+                    self.llm_settings.update(json.load(f) or {})
         self._log(f"[{ts()}] [infero] Loaded being {self.being_id} from disk: consciousness={len(self.consciousness)} chars")
         return True
 
@@ -326,7 +328,7 @@ class GenesisWorker:
                 with open(id_path, 'w', encoding='utf-8') as f:
                     json.dump(identity, f, ensure_ascii=False)
                 self._log(f"[{ts()}] [infero] identity synced to {id_path}")
-        self.llm_settings = data.get('settings', {})
+        self.llm_settings.update(data.get('settings') or {})
         self.devices = data.get('devices', {})
         self.hidden_devices = set(data.get('hiddenDevices', []))
         loop_was_running = data.get('loopWasRunning', False)
@@ -704,13 +706,18 @@ class GenesisWorker:
         self._log(f"[{ts()}] [Compress] saved {log_name}, bridge={len(fresh)} entries ({len(bridge_block)} chars), tail={tail_chars}, total={len(self.consciousness)}")
 
     def _skill_shell_code(self, code):
-        """Pick the shell variant of a skill's code. String code is treated as shell (best-effort);
-        object code with .shell key uses that. Returns None if no shell impl is available."""
-        if isinstance(code, str):
-            return code if code.strip() else None
+        """Pick the shell variant of a skill's code. Only an explicit code.shell runs as bash —
+        bare-string code is historically JS (browser host) and must not be evaled as shell."""
         if isinstance(code, dict):
             sh = code.get('shell')
             return sh if isinstance(sh, str) and sh.strip() else None
+        return None
+
+    def _skill_python_code(self, code):
+        """Pick the python variant of a skill's code (code.python). Runs in the agent process."""
+        if isinstance(code, dict):
+            py = code.get('python')
+            return py if isinstance(py, str) and py.strip() else None
         return None
 
     def _init_skill_code(self):
@@ -728,9 +735,20 @@ class GenesisWorker:
             except Exception:
                 continue
             if not v or v.get('enable') is not True: continue
+            name = v.get('id') or fn[:-5]
+            # In-process python variant: exec module body, then call install(agent) if defined.
+            py = self._skill_python_code(v.get('code'))
+            if py:
+                try:
+                    ns = {}
+                    exec(py, ns)
+                    if callable(ns.get('install')):
+                        ns['install'](self)
+                    self._log(f"[{ts()}] [infero] skill python init ok: {name}")
+                except Exception as e:
+                    errors.append(f"[skill:{name}] python init crashed: {e}")
             sh = self._skill_shell_code(v.get('code'))
             if not sh: continue
-            name = v.get('id') or fn[:-5]
             try:
                 r = subprocess.run(['bash', '-c', sh], capture_output=True, text=True, timeout=10)
                 if r.returncode != 0:
@@ -740,7 +758,7 @@ class GenesisWorker:
             except Exception as e:
                 errors.append(f"[skill:{name}] shell init crashed: {e}")
         if errors:
-            note = "\n\nSystem - [Skills] - shell init had errors. Each skill's `code` field was tried as bash; rewrite the offending ones (use `code: {js, shell, python}` to give per-runtime variants).\n" + "\n".join(errors) + "\n\n"
+            note = "\n\nSystem - [Skills] - code init had errors. Give per-runtime variants via `code: {js, shell, python}`; python may define install(agent) to patch the running agent.\n" + "\n".join(errors) + "\n\n"
             self.consciousness += note
             self._log(f"[{ts()}] [infero] {len(errors)} skill shell errors surfaced to consciousness")
 
