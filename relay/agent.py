@@ -1328,6 +1328,17 @@ async def connect_instance(cfg):
                     elif mtype == 'loop_handoff':
                         w = get_worker(being_id)
                         log(cfg['relay_ws'], f"[{ts()}] [infero] MSG loop_handoff for being={being_id}, worker={w is not None}")
+                        # A live run_loop survives WS reconnects; spawning a second one
+                        # makes two inferences stream concurrently. Stop the old task first.
+                        old = w._loop_task
+                        if old and not old.done():
+                            log(cfg['relay_ws'], f"[{ts()}] [infero] loop_handoff: cancelling live run_loop before re-handoff")
+                            w.running = False
+                            old.cancel()
+                            try:
+                                await old
+                            except BaseException:
+                                pass
                         w._loop_task = asyncio.create_task(w.on_loop_handoff(msg.get('payload', '')))
                     elif mtype == 'loop_stop':
                         w = workers.get(being_id)
