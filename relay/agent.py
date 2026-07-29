@@ -1248,7 +1248,7 @@ async def connect_instance(cfg):
     iid = cfg['instance_id'][:8]
     while True:
         try:
-            async with websockets.connect(cfg['relay_ws']) as ws:
+            async with websockets.connect(cfg['relay_ws'], ping_interval=60, ping_timeout=120) as ws:
                 backoff = 1
                 _device_os = 'Windows' if sys.platform == 'win32' else 'macOS' if sys.platform == 'darwin' else 'Linux'
                 await ws.send(json.dumps({

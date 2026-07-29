@@ -2963,8 +2963,8 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     _relayPongTimer = setTimeout(() => {
                         console.warn('[relay] Pong timeout, reconnecting...');
                         _relayWs.close();
-                    }, 5000);
-                }, 15000);
+                    }, 20000);
+                }, 30000);
             }
             function stopHeartbeat() {
                 clearInterval(_relayPingTimer);
