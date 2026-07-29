@@ -1519,6 +1519,24 @@ async def connect_instance(cfg):
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
+def acquire_single_instance_lock():
+    """One agent per INFERO_DIR. A second copy would register the same device
+    twice and double-run every trigger/user_input. Held for process lifetime."""
+    lock_path = os.path.join(INFERO_DIR, 'agent.lock')
+    try:
+        import fcntl
+        f = open(lock_path, 'w')
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(f"[{ts()}] [infero] Another agent is already running for {INFERO_DIR} (agent.lock held). Exiting.")
+            sys.exit(1)
+        f.write(str(os.getpid()))
+        f.flush()
+        return f  # keep open — lock releases on process exit
+    except ImportError:
+        return None  # Windows: no fcntl; rely on service manager
+
 async def main():
     instances = load_instances()
     if not instances:
@@ -1527,4 +1545,5 @@ async def main():
     print(f"[{ts()}] [infero] Starting agent — {len(instances)} instance(s), device: {DEVICE_NAME}")
     await asyncio.gather(*[connect_instance(c) for c in instances])
 
+_agent_lock = acquire_single_instance_lock()
 asyncio.run(main())
