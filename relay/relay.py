@@ -970,8 +970,7 @@ async def main():
 
     # WebSocket server
     ws_port = int(os.environ.get('WS_PORT', 8081))
-    async with websockets.serve(ws_handler, '0.0.0.0', ws_port,
-                                ping_interval=60, ping_timeout=120):
+    async with websockets.serve(ws_handler, '0.0.0.0', ws_port):
         print(f"[{ts()}] [relay] WebSocket listening on :{ws_port}")
         await asyncio.Future()  # run forever
 
