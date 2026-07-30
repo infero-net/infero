@@ -3440,11 +3440,29 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
 
             // ─── Distributed loop messages ───────────────────────────────
             if (msg.type === 'stream_token') {
-                if (settings.hostDevice === 'this browser') return;
+                if (settings.hostDevice === 'this browser') {
+                    // A device is streaming but we think we host — usually a stale
+                    // auto-takeover after a relay blip. If we're idle, re-adopt the
+                    // sender as host and keep rendering instead of dropping silently.
+                    const sender = msg.sender;
+                    if (!loopRunning && sender && settings.devices?.[sender]) {
+                        console.warn(`[stream] token from ${sender} while hostDevice=browser & idle — re-adopting remote host`);
+                        settings.hostDevice = sender;
+                        saveSettingsToStorage(settings);
+                        renderDeviceList();
+                        setStatus('Remote');
+                    } else {
+                        console.warn(`[stream] DROPPED stream_token from ${sender}: hostDevice=browser, loopRunning=${loopRunning}`);
+                        return;
+                    }
+                }
                 const dec = await relayDec(msg);
-                if (!dec) return;
+                if (!dec) { console.warn(`[stream] DROPPED stream_token from ${msg.sender}: decrypt failed`); return; }
                 const { content } = dec;
-                if (content.being_id && content.being_id !== currentBeingId) return;
+                if (content.being_id && content.being_id !== currentBeingId) {
+                    console.warn(`[stream] DROPPED stream_token: being ${content.being_id?.slice(0,8)} ≠ current ${currentBeingId?.slice(0,8)}`);
+                    return;
+                }
                 if (!window._remoteAiDiv) {
                     window._remoteAiDiv = document.createElement('div');
                     window._remoteAiDiv.className = 'msg ai';
