@@ -3810,7 +3810,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             if (!confirm(`Switch core loop host?\n\n${fromLabel}  →  ${toLabel}`)) { console.log(`[setHostDevice] CANCELLED by user`); return; }
             console.log(`[setHostDevice] CONFIRMED ${fromLabel} → ${toLabel}`);
             settings.hostDevice = name;
-            settings.preferredHost = name;
             saveSettingsToStorage(settings);
             renderDeviceList();
 
