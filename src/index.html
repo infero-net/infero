@@ -2568,7 +2568,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 deviceLines += `\n  - ${name}(online, ${dtype})${isHost ? ' [core loop host]' : ''}`;
             }
             const deviceSection = deviceLines ? `\nDevices (expandable — user can add via Settings > Add Device; inspect initRelay() for protocol details): ${deviceLines}` : '';
-            let ctx = `[Realtime]\nReminder: end with /self_continue or /call_for_trigger${deviceSection}`;
+            let ctx = `[Realtime]\nReminder: end with /self_continue or /call_for_trigger\nAnything already written above has been seen — don't restate it, write only what's new this cycle.${deviceSection}`;
 
             const ui = document.getElementById('html-div');
             if (_justReloaded) {

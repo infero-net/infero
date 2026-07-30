@@ -442,7 +442,7 @@ class GenesisWorker:
                 lines += '\n    - Capabilities: persistent processes, file I/O, system access, any language/runtime'
                 lines += f'\n    - Exec: /exec shell {name}\n```bash\n<command>\n```'
                 lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
-        return f'[Realtime]\nReminder: end with /self_continue or /call_for_trigger\nDevices:{lines}'
+        return f"[Realtime]\nReminder: end with /self_continue or /call_for_trigger\nAnything already written above has been seen — don't restate it, write only what's new this cycle.\nDevices:{lines}"
 
     async def perceive(self):
         now = datetime.now()
