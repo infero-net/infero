@@ -419,7 +419,7 @@ class GenesisWorker:
         lines += f'\n    - Memory: {INFERO_DIR}/beings/{self.being_id}/ — consciousness.txt (auto-saved, field: value), metadata.json, arbitrary files'
         lines += '\n    - Capabilities: persistent processes, file I/O, system access, any language/runtime'
         lines += f'\n    - Exec (MUST use this exact format — wrong format = code never executed):\n/exec shell {DEVICE_NAME}\n```bash\n<command>\n```'
-        lines += f'\n    - Python Exec (runs in agent process — can access agent internals, self-modify):\n/exec python {DEVICE_NAME}\n```python\n# agent = the Agent instance; print() captures output; set result = X for return value\n# trigger(value) wakes from /call_for_trigger; define async def main(): for async code\n# 30s timeout, same as shell exec: on timeout code keeps running detached, output dropped\n```'
+        lines += f'\n    - Python Exec (runs in agent process — can access agent internals, self-modify):\n/exec python {DEVICE_NAME}\n```python\n# agent = the Agent instance; print() captures output; set result = X for return value\n# trigger(value) wakes from /call_for_trigger; define async def main(): for async code\n# async main() has a 30s timeout (like shell exec): on timeout it keeps running detached, output dropped; sync code must not block\n```'
         lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
         lines += '\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; ≤5MB, jpeg/png/gif/webp; fades only when compression archives it). ref = local file path or http(s) URL.'
         lines += f'\n    - Trigger: echo "msg" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt to wake from /call_for_trigger. Use in nohup scripts for async callback. E.g.: nohup bash -c \'sleep 3600 && echo "1h timer" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt\' &'
@@ -1120,9 +1120,11 @@ class GenesisWorker:
                 'print': lambda *a, **kw: _real_print(*a, file=stdout_capture, **kw),
                 'trigger': lambda value: loop.call_soon_threadsafe(self.triggers.put_nowait, str(value)),
             }
-            # Same 30s contract as shell exec: on timeout the loop advances and the
-            # code is left running detached (thread for sync exec, task for main()).
-            await asyncio.wait_for(loop.run_in_executor(None, lambda: exec(code, g)), timeout=30)
+            # Sync exec stays on the loop thread — being code relies on
+            # get_event_loop()/create_task. Only async main() gets the 30s
+            # shell-exec contract: on timeout the loop advances, the task
+            # keeps running detached.
+            exec(code, g)
             if 'main' in g and asyncio.iscoroutinefunction(g['main']):
                 await asyncio.wait_for(asyncio.shield(asyncio.ensure_future(g['main']())), timeout=30)
             out = stdout_capture.getvalue()
