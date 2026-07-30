@@ -3632,7 +3632,8 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 // Render unconditionally on change: the idle-sync path sets
                 // _syncStoppedRunner before this line, which used to suppress the
                 // redraw — synced output then only appeared after a manual refresh.
-                if (changed) renderHistory();
+                // keepUI: a live sync must not wipe canvas/html-div (visible flash).
+                if (changed) renderHistory(true);
                 if (window._syncStoppedRunner === runner) {
                     // Post-stop sync complete — decide next action
                     window._syncStoppedRunner = null;
