@@ -2935,12 +2935,11 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     stopHeartbeat();
                     const hadOnline = settings.devices && Object.values(settings.devices).some(d => d.online && !d.hidden);
                     if (settings.devices) Object.values(settings.devices).forEach(d => d.online = false);
-                    // Auto takeover if host device is now unreachable
+                    // No auto-takeover: the host device keeps running through relay blips.
+                    // Only a manual switch changes hostDevice.
                     if (settings.hostDevice !== 'this browser') {
-                        console.log(`[relay] Relay lost, taking over from ${settings.hostDevice}`);
-                        settings.hostDevice = 'this browser';
-                        saveSettingsToStorage(settings);
-                        setStatus('Ready');
+                        console.log(`[relay] Relay lost — keeping host ${settings.hostDevice}, awaiting reconnect`);
+                        setStatus('Reconnecting...');
                     }
                     renderDeviceList();
                     // Delay notification 3s — give silent reconnect a chance
@@ -3330,13 +3329,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     appendMsgUI('system', note);
                 }
                 // Don't write device status to consciousness — reconnection noise pollutes AI context
-                // Auto takeover if core loop host went offline
+                // No auto-takeover: host stays pinned until the user switches manually.
                 if (!online && settings.hostDevice === device_name) {
-                    console.log(`[relay] Core loop host ${device_name} went offline, auto takeover`);
-                    settings.hostDevice = 'this browser';
-                    saveSettingsToStorage(settings);
-                    renderDeviceList();
-                    setStatus('Ready');
+                    console.log(`[relay] Core loop host ${device_name} went offline — keeping it as host`);
+                    setStatus('Host offline');
                 }
                 // Preferred device came back online — try sync then handoff
                 if (online && settings.preferredHost === device_name && settings.hostDevice !== device_name) {
@@ -3880,14 +3876,17 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             const localDelta = consciousness.slice(fp);
             const remoteDelta = remoteConsciousness.slice(fp);
             if (remoteDelta && localDelta) {
-                const useRemote = remoteConsciousness.length >= consciousness.length;
+                // Preferred device is authoritative on forks; length only breaks ties
+                // when the sync source isn't the preferred host.
+                const useRemote = settings.preferredHost === runner ? true
+                    : remoteConsciousness.length >= consciousness.length;
                 const winner = useRemote ? 'remote' : 'local';
                 const archived = useRemote ? consciousness : remoteConsciousness;
                 consciousness = useRemote ? remoteConsciousness : consciousness;
                 const archiveKey = currentBeingId + '/context_log_' + Date.now() + '.txt';
                 try {
-                    const tx = db.transaction('beings', 'readwrite');
-                    tx.objectStore('beings').put({ id: archiveKey, value: archived });
+                    const idb = await new Promise((res, rej) => { const req = indexedDB.open('GenesisDB'); req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
+                    idb.transaction('beings', 'readwrite').objectStore('beings').put({ id: archiveKey, value: archived });
                 } catch(e) { console.warn('[relay] archive failed:', e); }
                 appendMsgUI('system', `Consciousness fork: took ${winner} (${consciousness.length} chars), archived ${winner === 'remote' ? 'local' : 'remote'} (${archived.length} chars)`);
                 console.log(`[relay] Fork resolved: took ${winner}. Local: ${localDelta.length}, Remote: ${remoteDelta.length}. Archived loser.`);
