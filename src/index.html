@@ -2916,10 +2916,20 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
             function connect() {
                 if (_relayGeneration !== gen) return;
+                if (_relayWs) {
+                    // Kill any previous socket (may still be CONNECTING/OPEN) so two
+                    // live connections never deliver every message twice.
+                    _relayWs.onclose = null; _relayWs.onmessage = null;
+                    try { _relayWs.close(); } catch (_) {}
+                    _relayWs = null;
+                }
+                let ws;
                 try {
-                    _relayWs = new WebSocket(url);
+                    ws = new WebSocket(url);
                 } catch (e) { scheduleReconnect(); return; }
-                _relayWs.onopen = () => {
+                _relayWs = ws;
+                ws.onopen = () => {
+                    if (ws !== _relayWs) { try { ws.close(); } catch (_) {} return; }
                     _relayConnected = true;
                     _retryCount = 0;
                     // Cancel pending disconnect notification — silent reconnect
@@ -2933,14 +2943,16 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     renderDeviceList();
                     startHeartbeat();
                 };
-                _relayWs.onmessage = (e) => {
+                ws.onmessage = (e) => {
+                    if (ws !== _relayWs) return;
                     try {
                         const msg = JSON.parse(e.data);
                         if (msg.type === 'pong') { clearTimeout(_relayPongTimer); return; }
                         handleRelayMessage(msg);
                     } catch (_) {}
                 };
-                _relayWs.onclose = () => {
+                ws.onclose = () => {
+                    if (ws !== _relayWs) return;
                     _relayConnected = false;
                     stopHeartbeat();
                     const hadOnline = settings.devices && Object.values(settings.devices).some(d => d.online && !d.hidden);
@@ -2963,7 +2975,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     }
                     scheduleReconnect();
                 };
-                _relayWs.onerror = () => { _relayWs.close(); };
+                ws.onerror = () => { try { ws.close(); } catch (_) {} };
             }
             function startHeartbeat() {
                 stopHeartbeat();
