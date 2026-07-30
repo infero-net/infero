@@ -2274,11 +2274,14 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         }
 
         async function renderHistory(keepUI = false) {
-            chatBox.innerHTML = '<div class="msg ai">System online. Initializing.</div>';
             if (!consciousness) {
+                chatBox.innerHTML = '<div class="msg ai">System online. Initializing.</div>';
                 if (!keepUI) { cancelAllAnimations(); canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height); document.getElementById('html-div').innerHTML = ''; }
                 return;
             }
+            // Build offscreen, swap once — a live rebuild flashes an empty chat on every idle sync
+            window._renderTarget = document.createDocumentFragment();
+            try {
 
             // Only render the last 100k characters to keep UI responsive
             const RENDER_LIMIT = 100000;
@@ -2316,6 +2319,11 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 } else if (trimmed.startsWith('System - [')) {
                     appendMsgUI('system', trimmed);
                 }
+            }
+            } finally {
+                const frag = window._renderTarget;
+                window._renderTarget = null;
+                if (frag) chatBox.replaceChildren(frag);
             }
             scrollToBottom(true);
             if (keepUI) return;
@@ -2723,9 +2731,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
 
         function appendMsgUI(role, text) {
             if (text === "System - [Auto] - Please continue.") return null;
+            const target = window._renderTarget || chatBox;
             const div = document.createElement('div');
             if (role === 'timestamp') {
-                const prev = chatBox.lastElementChild;
+                const prev = target.lastElementChild;
                 if (prev?.classList.contains('msg-timestamp')) prev.remove();
                 div.className = 'msg-timestamp';
                 div.textContent = text;
@@ -2740,8 +2749,8 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     div.addEventListener('click', () => timeRewind(div));
                 }
             }
-            chatBox.appendChild(div);
-            scrollToBottom();
+            target.appendChild(div);
+            if (target === chatBox) scrollToBottom();
             return div;
         }
 
