@@ -277,6 +277,7 @@ class GenesisWorker:
             msgs.append(self.triggers.get_nowait())
         merged = '\n'.join(m for m in msgs if m)
         if merged:
+            self._woke_external = True
             self.consciousness += f"System - [Trigger] {merged}\n\n"
             self._log(f"[{ts()}] triggered ({len(msgs)} msgs): {merged[:200]}")
             await self.send_relay({'type': 'exec_display', 'sender': DEVICE_NAME,
@@ -405,7 +406,7 @@ class GenesisWorker:
             if not cont:
                 break
 
-    def _build_realtime(self):
+    def _build_realtime(self, external_input=False):
         lines = ''
         # Self (this device, the current loop host)
         _os_info = 'Windows (PowerShell)' if sys.platform == 'win32' else ('macOS' if sys.platform == 'darwin' else 'Linux')
@@ -442,19 +443,24 @@ class GenesisWorker:
                 lines += '\n    - Capabilities: persistent processes, file I/O, system access, any language/runtime'
                 lines += f'\n    - Exec: /exec shell {name}\n```bash\n<command>\n```'
                 lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
-        return f"[Realtime]\nReminder: end with /self_continue or /call_for_trigger\nAnything already written above has been seen — don't restate it, write only what's new this cycle.\nDevices:{lines}"
+        turn_note = ("New external input arrived this cycle."
+                     if external_input else
+                     "No new user input since your last message — what follows is only the result of your own previous action. Write only what is new this cycle.")
+        return f"[Realtime]\nReminder: end with /self_continue or /call_for_trigger\n{turn_note}\nDevices:{lines}"
 
     async def perceive(self):
         now = datetime.now()
         days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
         tz_offset = now.astimezone().strftime('%z')
         env = f"[System Environment]\nTime: {now.strftime('%Y-%m-%d %H:%M:%S')} (UTC{tz_offset})\nDay: {days[now.weekday()]}"
-        realtime = self._build_realtime()
-        # Build the full prompt context (env + realtime + user_input)
-        # but only persist env + user_input to consciousness (not realtime)
         user_input = self.pending_user_input
         if user_input:
             self.pending_user_input = None
+        external = bool(user_input) or getattr(self, '_woke_external', False)
+        self._woke_external = False
+        realtime = self._build_realtime(external)
+        # Build the full prompt context (env + realtime + user_input)
+        # but only persist env + user_input to consciousness (not realtime)
         if user_input == '__go__':
             user_input = None  # empty Go — just trigger loop, no text
         # What gets persisted to consciousness.txt (no [Realtime])

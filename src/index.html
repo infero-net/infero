@@ -94,6 +94,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         async function perceive() {
             const env = getPersistentContext();
             const hasUserInput = !!currentUserInput;
+            window._cycleHadUserInput = hasUserInput;
             const userText = currentUserInput;
             const parts = [env];
             if (currentUserInput) { parts.push(currentUserInput); currentUserInput = null; }
@@ -2568,7 +2569,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 deviceLines += `\n  - ${name}(online, ${dtype})${isHost ? ' [core loop host]' : ''}`;
             }
             const deviceSection = deviceLines ? `\nDevices (expandable — user can add via Settings > Add Device; inspect initRelay() for protocol details): ${deviceLines}` : '';
-            let ctx = `[Realtime]\nReminder: end with /self_continue or /call_for_trigger\nAnything already written above has been seen — don't restate it, write only what's new this cycle.${deviceSection}`;
+            const turnNote = window._cycleHadUserInput
+                ? 'New external input arrived this cycle.'
+                : 'No new user input since your last message — what follows is only the result of your own previous action. Write only what is new this cycle.';
+            let ctx = `[Realtime]\nReminder: end with /self_continue or /call_for_trigger\n${turnNote}${deviceSection}`;
 
             const ui = document.getElementById('html-div');
             if (_justReloaded) {
