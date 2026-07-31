@@ -581,7 +581,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             const blocks = [];
             let last = 0;
             for (const m of text.matchAll(IMG_MARKER_RE)) {
-                const rec = await DB.get(m[1]).catch(() => null);
+                const rec = await _resolveMarkerRec(m[1]);
                 if (!rec || typeof rec.value !== 'string') continue;  // image gone → marker stays as text
                 if (m.index > last) blocks.push({ text: text.slice(last, m.index) });
                 blocks.push({ media_type: rec.media_type || 'image/jpeg', data: rec.value });
@@ -2720,10 +2720,35 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         }
         _statusInterval = setInterval(() => { _statusFlip = !_statusFlip; renderStatus(); }, 3000);
 
+        async function _resolveMarkerRec(key) {
+            let rec = await DB.get(key).catch(() => null);
+            if (rec && typeof rec.value === 'string') return rec;
+            // Agent-side /view stores the image on the device; the synced marker is a
+            // device-local path. Pull it over the relay once and cache it in IndexedDB.
+            if (key.startsWith('/') || key.startsWith('~') || /^[A-Za-z]:\\/.test(key)) {
+                const host = settings.hostDevice;
+                if (host && host !== 'this browser' && settings.devices?.[host]?.online) {
+                    try {
+                        const blob = await relayFileRead(host, key);
+                        const b64 = await new Promise((res, rej) => {
+                            const r = new FileReader();
+                            r.onload = () => res(r.result.split(',')[1]);
+                            r.onerror = () => rej(new Error('read failed'));
+                            r.readAsDataURL(blob);
+                        });
+                        rec = { id: key, value: b64, media_type: blob.type || 'image/jpeg' };
+                        await DB.put(rec);
+                        return rec;
+                    } catch (e) { console.warn(`[view] device image fetch failed: ${key}`, e.message); }
+                }
+            }
+            return null;
+        }
+
         async function _hydrateViewThumbs(div) {
             for (const img of div.querySelectorAll('img.view-thumb[data-view-key]')) {
                 const key = decodeURIComponent(img.dataset.viewKey);
-                const rec = await DB.get(key).catch(() => null);
+                const rec = await _resolveMarkerRec(key);
                 if (rec && typeof rec.value === 'string') {
                     img.src = `data:${rec.media_type || 'image/jpeg'};base64,${rec.value}`;
                     img.removeAttribute('data-view-key');
