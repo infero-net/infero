@@ -1406,6 +1406,12 @@ async def connect_instance(cfg):
                                     w._loop_task = asyncio.create_task(w.run_loop(False))
                         except Exception as e:
                             log(cfg['relay_ws'], f"[{ts()}] [infero] user_input decrypt error: {e}")
+                            # Silent loss looks like a dead being — tell the browser in plaintext.
+                            try:
+                                await ws.send(json.dumps({'type': 'exec_display', 'sender': DEVICE_NAME,
+                                    'plain': f"System - [{DEVICE_NAME}] - Could not decrypt your message (session key mismatch). It was NOT delivered. Re-key or re-pair this device from the device list."}))
+                            except Exception:
+                                pass
                     elif mtype == 'result':
                         for w in workers.values():
                             w.on_exec_result(msg)

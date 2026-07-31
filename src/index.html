@@ -3570,6 +3570,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
 
             if (msg.type === 'exec_display') {
+                if (msg.plain) { appendMsgUI('system', msg.plain); return; }
                 const dec = await relayDec(msg);
                 if (!dec) return;
                 const { content } = dec;
