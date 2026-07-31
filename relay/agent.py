@@ -1398,6 +1398,10 @@ async def connect_instance(cfg):
                                 w.being_id = iid
                                 if w.load_from_disk():
                                     log(cfg['relay_ws'], f"[{ts()}] [infero] user_input: restored worker from disk: {len(w.consciousness)} chars")
+                                    # Align with browser switchBeing: eval enabled skills' code on
+                                    # being load, not only at handoff. Restores in-process patches
+                                    # (install(agent)) after a watchdog restart.
+                                    w._init_skill_code()
                                     w.running = True
                                     w._loop_task = asyncio.create_task(w.run_loop(False))
                                 else:
