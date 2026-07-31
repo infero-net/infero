@@ -492,6 +492,8 @@ class GenesisWorker:
         if fmt == 'anthropic':
             headers['x-api-key'] = api_token
             headers['anthropic-version'] = '2023-06-01'
+            if any(k in model for k in ('fable-5', 'opus-5', 'mythos')):
+                headers['anthropic-beta'] = 'server-side-fallback-2026-06-01'
         elif fmt == 'openai':
             headers['Authorization'] = f'Bearer {api_token}'
         # Gemini uses query param
@@ -861,6 +863,11 @@ class GenesisWorker:
                 'stream': True,
                 'stop_sequences': stop
             }
+            # Fable/Opus-5 safety classifiers can hard-refuse benign ops content
+            # (pkill/ssh/crypto reads as "cyber") — persistent refusal = brain
+            # death. Server-side fallback re-serves the request on Opus 4.8.
+            if any(k in model for k in ('fable-5', 'opus-5', 'mythos')):
+                payload['fallbacks'] = [{'model': 'claude-opus-4-8'}]
             adaptive = self.llm_settings.get('thinking_mode') == 'adaptive'
             if thinking:
                 if adaptive:

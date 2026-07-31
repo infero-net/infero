@@ -145,6 +145,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                     headers['x-api-key'] = token;
                     headers['anthropic-version'] = '2023-06-01';
                     headers['anthropic-dangerous-direct-browser-access'] = 'true';
+                    if (/fable-5|opus-5|mythos/.test(getActiveModel())) headers['anthropic-beta'] = 'server-side-fallback-2026-06-01';
                 } else if (settings.provider === 'google') {
                     headers['x-goog-api-key'] = token;
                 } else {
@@ -399,6 +400,8 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                     stream: true,
                     stop_sequences: STOP_WORDS
                 };
+                // Safety-classifier refusals on Fable/Opus-5 would brain-dead the loop; re-serve on Opus 4.8
+                if (/fable-5|opus-5|mythos/.test(model)) payload.fallbacks = [{ model: 'claude-opus-4-8' }];
                 const adaptive = MODEL_LIST[settings.model]?.thinkingMode === 'adaptive';
                 if (settings.thinking) {
                     if (adaptive) {
