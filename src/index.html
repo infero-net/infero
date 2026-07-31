@@ -3360,24 +3360,8 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     console.log(`[relay] Core loop host ${device_name} went offline — keeping it as host`);
                     setStatus('Host offline');
                 }
-                // Preferred device came back online — try sync then handoff
-                if (online && settings.preferredHost === device_name && settings.hostDevice !== device_name) {
-                    console.log(`[relay] Preferred host ${device_name} is back online, sync then handoff`);
-                    window._forkPoint = consciousness.length;
-                    window._syncThenHandoff = device_name;
-                    if (_relayWs && _relayConnected) {
-                        _relayWs.send(JSON.stringify({ type: 'consciousness_sync', device_name, being_id: currentBeingId, action: 'request' }));
-                        setStatus('Syncing...');
-                        // Timeout: if no sync response in 3s, handoff anyway
-                        setTimeout(() => {
-                            if (window._syncThenHandoff === device_name) {
-                                console.log(`[relay] Sync timeout — device unresponsive, staying on browser`);
-                                window._syncThenHandoff = null;
-                                setStatus('Ready');
-                            }
-                        }, 3000);
-                    }
-                }
+                // No auto-handoff to a returning preferred device: host changes are manual only.
+                // Fork resolution is decided by the human via askForkChoice.
                 // Host device is online — sync consciousness first, then handoff if needed.
                 // No _remoteLoopRunning guard: output streamed while our WS was down only
                 // exists on the device; without this sync it never reaches the screen.
@@ -3668,9 +3652,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                         const target = _pendingHandoff;
                         _pendingHandoff = null;
                         doHandoff(target);
-                    } else if (settings.preferredHost === runner && settings.hostDevice !== runner && !window._manualTakeover) {
-                        console.log(`[relay] Synced with preferred host ${runner}, handing off`);
-                        doHandoff(runner);
                     } else if (settings.hostDevice === 'this browser') {
                         window._manualTakeover = false;
                         setStatus('Ready');
@@ -3912,10 +3893,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             const localDelta = consciousness.slice(fp);
             const remoteDelta = remoteConsciousness.slice(fp);
             if (remoteDelta && localDelta) {
-                // Preferred device is authoritative on forks; length only breaks ties
-                // when the sync source isn't the preferred host.
-                const useRemote = settings.preferredHost === runner ? true
-                    : remoteConsciousness.length >= consciousness.length;
+                // Real fork: both sides wrote after the common prefix — the human decides.
+                if (window._forkModalOpen) { console.log('[relay] Fork modal already open, skipping this sync'); return false; }
+                const useRemote = await askForkChoice(runner, localDelta, remoteDelta);
                 const winner = useRemote ? 'remote' : 'local';
                 const archived = useRemote ? consciousness : remoteConsciousness;
                 consciousness = useRemote ? remoteConsciousness : consciousness;
@@ -3937,6 +3917,37 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             window._forkPoint = 0;
             await saveBeing();
             return true;
+        }
+
+        function askForkChoice(runner, localDelta, remoteDelta) {
+            window._forkModalOpen = true;
+            const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            const tail = s => esc(s.length > 400 ? '…' + s.slice(-400) : s);
+            return new Promise(resolve => {
+                const ov = document.createElement('div');
+                ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;';
+                ov.innerHTML = `
+                  <div style="background:#111827;border:1px solid #374151;border-radius:12px;max-width:720px;width:92%;max-height:80vh;overflow:auto;padding:20px;color:#e5e7eb;font-size:13px;">
+                    <h3 style="margin:0 0 8px;">Consciousness diverged</h3>
+                    <p style="margin:0 0 14px;color:#9ca3af;">This browser and <b>${esc(runner)}</b> both continued from the same point. Choose which timeline to keep — the other is archived, not deleted.</p>
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                      <div style="flex:1;min-width:280px;">
+                        <div style="font-weight:600;margin-bottom:6px;">${esc(runner)} (+${remoteDelta.length} chars)</div>
+                        <pre style="white-space:pre-wrap;background:#0b0f1a;border:1px solid #374151;border-radius:8px;padding:8px;max-height:200px;overflow:auto;">${tail(remoteDelta)}</pre>
+                        <button id="fork-remote" style="width:100%;margin-top:8px;padding:8px;border-radius:8px;border:0;background:#10b981;color:#fff;cursor:pointer;">Continue from ${esc(runner)}</button>
+                      </div>
+                      <div style="flex:1;min-width:280px;">
+                        <div style="font-weight:600;margin-bottom:6px;">This browser (+${localDelta.length} chars)</div>
+                        <pre style="white-space:pre-wrap;background:#0b0f1a;border:1px solid #374151;border-radius:8px;padding:8px;max-height:200px;overflow:auto;">${tail(localDelta)}</pre>
+                        <button id="fork-local" style="width:100%;margin-top:8px;padding:8px;border-radius:8px;border:0;background:#3b82f6;color:#fff;cursor:pointer;">Continue from this browser</button>
+                      </div>
+                    </div>
+                  </div>`;
+                document.body.appendChild(ov);
+                const done = useRemote => { window._forkModalOpen = false; ov.remove(); resolve(useRemote); };
+                ov.querySelector('#fork-remote').onclick = () => done(true);
+                ov.querySelector('#fork-local').onclick = () => done(false);
+            });
         }
 
         async function doHandoff(targetDevice) {
