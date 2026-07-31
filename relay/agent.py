@@ -25,7 +25,7 @@ def _get_device_name():
 DEVICE_NAME = _get_device_name()
 
 def ts():
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')
 
 def get_log_file(relay_ws):
     """Return log file path. Windows always logs to file (no visible console under Task Scheduler).
@@ -633,7 +633,7 @@ class GenesisWorker:
         self.metadata['promptTokens'] = usage.get('promptTokens', 0)
         self.metadata['cachedTokens'] = usage.get('cachedTokens', 0)
         await self._maybe_refresh_cache(usage)
-        time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        time_str = datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S UTC%z')
         clean_ai = re.sub(r'^\*{0,2}Digital Being\s*[-–—]\s*\[.*?\]\*{0,2}\n?', '', ai_text)
         self.consciousness += f"**Digital Being - [{time_str}]**\n{clean_ai}\n\n"
         return ai_text
@@ -810,7 +810,7 @@ class GenesisWorker:
                 skills_text += f"\n### Skill: {s['name']}\n{s['instruction']}\n"
             skills_text += "\n[Note] skills are descriptions; `code` may be a string (single-runtime) or `{js, shell, python}` (per-runtime). On this host (server, agent.py) only `shell` is auto-eval'd at boot. Rewrite as needed. See skill `skills_mechanism`.\n===================\n\n"
         stable_head = core_mem_text + skills_text
-        being_prefix = f"**Digital Being - [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]**\n"
+        being_prefix = f"**Digital Being - [{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S UTC%z')}]**\n"
         volatile_tail = (realtime + '\n\n' if realtime else '') + being_prefix
         history_text = self.consciousness
         stop = ['\nSystem - [', '\n[System Environment]']

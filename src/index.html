@@ -40,6 +40,11 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
 
         // Infero, ergo sum.
         var _pendingHandoff = null;  // target device name for loop handoff
+        function _tzTag() {
+            const o = -new Date().getTimezoneOffset() / 60;
+            return `UTC${o >= 0 ? '+' : ''}${o}`;
+        }
+
         async function loop() {
             if (settings.hostDevice !== 'this browser') return;  // not our turn
             try {
@@ -271,7 +276,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 }
             }
 
-            const time_str = new Date().toLocaleString();
+            const time_str = new Date().toLocaleString() + ' ' + _tzTag();
             const cleanAiText = aiText
                 .replace(/^\*{0,2}[A-Za-z][\w\s]{0,29}\*{0,2}\s*[-–—]\s*\[[^\]\n]*\d[^\]\n]*\]\*{0,2}\n?/, '')
                 .replace(/\n\*{0,2}Digital Being\b[^\n]*$/, '');
@@ -332,7 +337,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             const supportsVision = MODEL_LIST[settings.model]?.vision !== false;
             const canvasImage = supportsVision ? await getCanvasImage() : null;
             const stableHead = await loadStableHead();
-            const beingPrefix = `**Digital Being - [${new Date().toLocaleString()}]**\n`;
+            const beingPrefix = `**Digital Being - [${new Date().toLocaleString()} ${_tzTag()}]**\n`;
             const volatileTail = getRealtimeContext() + '\n\n' + beingPrefix;
 
             // Drop gemini named cache if stableHead changed since cache creation —
