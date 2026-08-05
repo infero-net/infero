@@ -559,6 +559,11 @@ class GenesisWorker:
                     _raw_tail = ""
                     _first_chunk_logged = False
                     async for chunk in resp.content.iter_any():
+                        # Abort: loop_stop sets self.running=False; break streaming immediately
+                        # instead of finishing the whole inference.
+                        if not self.running:
+                            self._log(f"[{ts()}] [infero] Infer aborted by loop_stop ({len(ai_text)} chars streamed)")
+                            return None
                         raw = chunk.decode('utf-8', errors='replace')
                         if not _first_chunk_logged:
                             self._log(f"[{ts()}] [infero] Infer first chunk: {repr(raw[:200])}")
