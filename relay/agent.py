@@ -1091,7 +1091,13 @@ class GenesisWorker:
         return None, None
 
     async def _exec_view(self, ref):
-        """Resolve a /view ref (local path, URL, or <device>:<path>); copy into vision/, marker into consciousness."""
+        """Resolve a /view ref (local path, URL, or <device>:<path>); copy into vision/, marker into consciousness.
+        Also broadcasts exec_display so the browser shows the image right after the view runs,
+        instead of waiting for the next idle consciousness_sync."""
+        async def _done(msg):
+            await self.send_relay({'type': 'exec_display', 'sender': DEVICE_NAME,
+                'payload': encrypt(self.cipher, {'being_id': self.being_id, 'text': msg.strip()})})
+            return msg
         try:
             dev, dev_path = self._parse_device_ref(ref)
             if dev:
@@ -1101,13 +1107,13 @@ class GenesisWorker:
                 async with aiohttp.ClientSession(trust_env=True) as s:
                     async with s.get(ref, timeout=aiohttp.ClientTimeout(total=20)) as r:
                         if r.status != 200:
-                            return f"System - [View] {ref} → failed: HTTP {r.status}\n\n"
+                            return await _done(f"System - [View] {ref} → failed: HTTP {r.status}\n\n")
                         data = await r.read()
                 mime = ''
             else:
                 path = os.path.expanduser(ref)
                 if not os.path.isfile(path):
-                    return f"System - [View] {ref} → failed: file not found\n\n"
+                    return await _done(f"System - [View] {ref} → failed: file not found\n\n")
                 with open(path, 'rb') as f:
                     data = f.read()
                 mime = mimetypes.guess_type(path)[0] or ''
@@ -1116,19 +1122,19 @@ class GenesisWorker:
             elif data[:4] == b'GIF8': mime = 'image/gif'
             elif data[:4] == b'RIFF' and data[8:12] == b'WEBP': mime = 'image/webp'
             if mime not in ('image/jpeg', 'image/png', 'image/gif', 'image/webp'):
-                return f"System - [View] {ref} → failed: unsupported type '{mime or 'unknown'}' (need jpeg/png/gif/webp)\n\n"
+                return await _done(f"System - [View] {ref} → failed: unsupported type '{mime or 'unknown'}' (need jpeg/png/gif/webp)\n\n")
             if len(data) > 5 * 1024 * 1024:
-                return f"System - [View] {ref} → failed: {len(data) // 1024}KB exceeds 5MB limit (downscale first)\n\n"
+                return await _done(f"System - [View] {ref} → failed: {len(data) // 1024}KB exceeds 5MB limit (downscale first)\n\n")
             ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp'}[mime]
             vision_dir = os.path.join(INFERO_DIR, 'beings', self.being_id, 'vision')
             os.makedirs(vision_dir, exist_ok=True)
             target = os.path.join(vision_dir, f"{int(time.time() * 1000)}.{ext}")
             with open(target, 'wb') as f:
                 f.write(data)
-            return (f"System - [View] loaded {ref} ({mime}, {len(data) // 1024}KB) into visual context:\n"
+            return await _done(f"System - [View] loaded {ref} ({mime}, {len(data) // 1024}KB) into visual context:\n"
                     f"<<<IMAGE:{target}>>>\n\n")
         except Exception as e:
-            return f"System - [View] {ref} → failed: {e}\n\n"
+            return await _done(f"System - [View] {ref} → failed: {e}\n\n")
 
     _IMG_MARKER_RE = re.compile(r'<<<IMAGE:([^>\n]+)>>>')
 
