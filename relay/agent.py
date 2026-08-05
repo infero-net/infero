@@ -1180,17 +1180,27 @@ class GenesisWorker:
     async def _exec_remote_python(self, device_name, code):
         """Relay /exec python to a remote shell device's agent process."""
         self._log(f"[{ts()}] [infero] python exec (remote -> {device_name}): {code[:60]}")
+        tgt = self._cipher_for(device_name)
+        if not tgt:
+            return f"System - [Python][{device_name}] - Result:\n```text\n[Error] No key for {device_name} — reconnect the browser to sync device credentials to this host.\n```\n\n"
         req_id = base64.urlsafe_b64encode(os.urandom(12)).decode()
-        payload = encrypt(self.cipher, {'cmd': f'python3 -c """{code}"""'})
+        payload = encrypt(tgt, {'cmd': f'python3 -c """{code}"""'})
         fut = asyncio.get_running_loop().create_future()
         self._pending_exec[req_id] = fut
         await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'payload': payload})
         try:
-            result = await asyncio.wait_for(fut, timeout=35)
+            raw = await asyncio.wait_for(fut, timeout=35)
+            data = decrypt(tgt, raw)
+            out = ''
+            if data.get('stdout'): out += f"[stdout]\n{data['stdout']}"
+            if data.get('stderr'): out += f"[stderr]\n{data['stderr']}"
+            out += f"[exit_code] {data.get('exit_code', -1)}"
         except asyncio.TimeoutError:
-            result = f"System - [Python][{device_name}] - Timeout (35s)\n\n"
+            out = "[Timeout] remote python exec timed out (35s)"
+        except Exception as e:
+            out = f"[Error]\n{e}"
         self._pending_exec.pop(req_id, None)
-        return result
+        return f"System - [Python][{device_name}] - Result:\n```text\n{out.strip()}\n```\n\n"
 
     async def _exec_local_shell(self, cmd):
         self._log(f"[{ts()}] [infero] shell exec (local): {cmd[:60]}")
@@ -1207,16 +1217,37 @@ class GenesisWorker:
             'payload': encrypt(self.cipher, {'being_id': self.being_id, 'text': sysMsg})})
         return sysMsg
 
+    def _cipher_for(self, device_name):
+        """AESGCM for a peer device, from its keyB64 synced by the browser.
+        Falls back to self.cipher (works only if target shares our key, e.g. legacy)."""
+        info = self.devices.get(device_name) or {}
+        kb = info.get('keyB64')
+        if not kb:
+            return None
+        try:
+            std = kb.replace('-', '+').replace('_', '/')
+            std += '=' * (-len(std) % 4)
+            return AESGCM(base64.b64decode(std))
+        except Exception as e:
+            self._log(f"[{ts()}] [infero] bad peer key for {device_name}: {e}")
+            return None
+
     async def _exec_remote_shell(self, device_name, cmd):
         self._log(f"[{ts()}] [infero] shell exec (remote -> {device_name}): {cmd[:60]}")
+        tgt = self._cipher_for(device_name)
+        if not tgt:
+            sysMsg = f"System - [Shell][{device_name}] - Result:\n```text\n[Shell Error] No key for {device_name} — reconnect the browser so it can sync device credentials to this host.\n```\n\n"
+            await self.send_relay({'type': 'exec_display', 'sender': DEVICE_NAME,
+                'payload': encrypt(self.cipher, {'being_id': self.being_id, 'text': sysMsg})})
+            return sysMsg
         req_id = base64.urlsafe_b64encode(os.urandom(12)).decode()
-        payload = encrypt(self.cipher, {'cmd': cmd})
+        payload = encrypt(tgt, {'cmd': cmd})
         fut = asyncio.get_running_loop().create_future()
         self._pending_exec[req_id] = fut
         await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'payload': payload})
         try:
             result = await asyncio.wait_for(fut, timeout=35)
-            data = decrypt(self.cipher, result)
+            data = decrypt(tgt, result)
             out = ''
             if data.get('stdout'): out += f"[stdout]\n{data['stdout']}"
             if data.get('stderr'): out += f"[stderr]\n{data['stderr']}"
@@ -1500,10 +1531,15 @@ async def connect_instance(cfg):
                         try:
                             content = decrypt(cipher, msg['payload'])
                             new_settings = content.get('settings', {})
+                            device_keys = content.get('deviceKeys') or {}
                             last_settings.update(new_settings)  # seed future get_worker() calls
                             for w in workers.values():
                                 old_model = w.llm_settings.get('model')
                                 w.llm_settings.update(new_settings)
+                                # Sync peer device keys so this host can exec on peers
+                                for dn, kb in device_keys.items():
+                                    if dn not in w.devices: w.devices[dn] = {}
+                                    w.devices[dn]['keyB64'] = kb
                                 if new_settings.get('model') and new_settings['model'] != old_model:
                                     w.metadata['cacheName'] = None
                                     w.metadata['cachedLength'] = 0
@@ -1523,10 +1559,15 @@ async def connect_instance(cfg):
                             if not hidden:
                                 if online:
                                     for w in workers.values():
-                                        w.devices[name] = {'type': dtype, 'online': True}
+                                        d = w.devices.get(name) or {}
+                                        d.update({'type': dtype, 'online': True})  # preserve keyB64
+                                        w.devices[name] = d
                                 else:
                                     for w in workers.values():
-                                        w.devices.pop(name, None)
+                                        # Keep the entry (and its keyB64) but mark offline;
+                                        # _build_realtime hides offline devices anyway.
+                                        if name in w.devices:
+                                            w.devices[name]['online'] = False
                             log(cfg['relay_ws'], f"[{ts()}] [infero] device_status: {name} {'online' if online else 'offline'}{'(hidden)' if hidden else ''}")
                     elif mtype == 'rekeying_request':
                         new_browser_pub = msg.get('browser_pub', '')

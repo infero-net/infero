@@ -2921,7 +2921,13 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             document.getElementById('settings-panel').style.display = 'none';
             if (getActiveModel() !== oldModel || getActiveFormat() !== oldFormat) { cacheName = null; cachedLength = 0; _cachedStableHead = null; }
             // Broadcast updated LLM settings to all connected devices
+            // Peer device keys so whichever device is host can encrypt exec for its peers.
+            const deviceKeys = {};
+            for (const [n, d] of Object.entries(settings.devices || {})) {
+                if (d.keyB64) deviceKeys[n] = d.keyB64;
+            }
             relayEncBroadcast('settings_update', {
+                deviceKeys,
                 settings: {
                     model: getActiveModel(),
                     provider: settings.provider,
@@ -4057,7 +4063,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             if (!settings.browserRemoved && !settings.browserHidden)
                 devicesSnapshot[`${bn} · ${os}`] = { type: 'browser', online: true };
             for (const [n, d] of Object.entries(settings.devices || {})) {
-                if (!d.hidden && d.online) devicesSnapshot[n] = { type: d.type || 'shell', online: true };
+                // Include keyB64 so a device host can encrypt exec payloads for its peers
+                // (device↔device E2E: relay never re-keys, each device only shares a key with the browser).
+                if (!d.hidden && d.online) devicesSnapshot[n] = { type: d.type || 'shell', online: true, keyB64: d.keyB64 || null };
             }
             const hiddenDevices = Object.entries(settings.devices || {}).filter(([,d]) => d.hidden).map(([n]) => n);
             if (settings.browserHidden) hiddenDevices.push('this browser');
