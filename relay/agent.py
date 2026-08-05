@@ -148,7 +148,8 @@ class GenesisWorker:
         self.pending_user_input = None
         self._stopped_sent = False
         self._pending_exec = {}  # req_id -> asyncio.Future
-        self.devices = {}  # name -> {type, online}
+        self._pending_file_reads = {}  # req_id -> {fut, chunks, got, total, mime, sender}
+        self.devices = {}  # name -> {type, online, keyB64}
         self.hidden_devices = set()
         self.being_id = ''
         self._last_prompt_tokens = 0
@@ -421,7 +422,7 @@ class GenesisWorker:
         lines += f'\n    - Exec (MUST use this exact format — wrong format = code never executed):\n/exec shell {DEVICE_NAME}\n```bash\n<command>\n```'
         lines += f'\n    - Python Exec (runs in agent process — can access agent internals, self-modify):\n/exec python {DEVICE_NAME}\n```python\n# agent = the Agent instance; print() captures output; set result = X for return value\n# trigger(value) wakes from /call_for_trigger; define async def main(): for async code\n# async main() has a 30s timeout (like shell exec): on timeout it keeps running detached, output dropped; sync code must not block\n```'
         lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
-        lines += '\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; ≤5MB, jpeg/png/gif/webp; fades only when compression archives it). ref = local file path or http(s) URL.'
+        lines += '\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; ≤5MB, jpeg/png/gif/webp; fades only when compression archives it). ref = local file path, http(s) URL, or <device>:<path> to read from an online peer device (≤5MB, key synced from browser).'
         lines += f'\n    - Trigger: echo "msg" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt to wake from /call_for_trigger. Use in nohup scripts for async callback. E.g.: nohup bash -c \'sleep 3600 && echo "1h timer" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt\' &'
         lines += '\n    - wake_me_up_when(sec): schedule a trigger after N seconds. No automatic watchdog — Being sleeps until triggered.'
         # Other devices
@@ -1077,10 +1078,26 @@ class GenesisWorker:
             await _flush(view_tasks)
 
 
+    def _parse_device_ref(self, ref):
+        """<device>:<path> where <device> is a known peer → (device, path), else (None, None)."""
+        i = ref.find(':')
+        if i <= 0:
+            return None, None
+        dev = ref[:i]
+        rest = ref[i + 1:]
+        # Only treat as remote if the prefix is a known device and the rest looks like a path.
+        if dev in self.devices and dev != DEVICE_NAME and (rest.startswith('/') or rest.startswith('~') or rest.startswith('.')):
+            return dev, rest
+        return None, None
+
     async def _exec_view(self, ref):
-        """Resolve a /view ref (local file path or URL); copy into vision/, marker into consciousness."""
+        """Resolve a /view ref (local path, URL, or <device>:<path>); copy into vision/, marker into consciousness."""
         try:
-            if ref.startswith('http://') or ref.startswith('https://'):
+            dev, dev_path = self._parse_device_ref(ref)
+            if dev:
+                data = await self._read_peer_file(dev, dev_path)
+                mime = mimetypes.guess_type(dev_path)[0] or ''
+            elif ref.startswith('http://') or ref.startswith('https://'):
                 async with aiohttp.ClientSession(trust_env=True) as s:
                     async with s.get(ref, timeout=aiohttp.ClientTimeout(total=20)) as r:
                         if r.status != 200:
@@ -1232,6 +1249,51 @@ class GenesisWorker:
             self._log(f"[{ts()}] [infero] bad peer key for {device_name}: {e}")
             return None
 
+    async def _read_peer_file(self, device_name, path):
+        """Read a file from a peer device over the relay (chunked, encrypted with the
+        peer's key). Returns bytes. Mirrors the browser's relayFileRead."""
+        tgt = self._cipher_for(device_name)
+        if not tgt:
+            raise RuntimeError(f"no key for {device_name} — reconnect the browser to sync device credentials")
+        req_id = base64.urlsafe_b64encode(os.urandom(12)).decode()
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_file_reads[req_id] = {'fut': fut, 'chunks': {}, 'got': 0, 'total': None, 'mime': ''}
+        # origin: so the responder addresses file_read_result back to us (relay routes by target)
+        await self.send_relay({'type': 'file_read', 'device_name': device_name, 'target': DEVICE_NAME,
+                               'payload': encrypt(tgt, {'path': path, 'req_id': req_id})})
+        try:
+            b64 = await asyncio.wait_for(fut, timeout=35)
+        finally:
+            self._pending_file_reads.pop(req_id, None)
+        return base64.b64decode(b64)
+
+    def on_file_read_result(self, msg):
+        """Reassemble chunked file_read_result from a peer device."""
+        req_id = msg.get('req_id')
+        p = self._pending_file_reads.get(req_id)
+        if not p or p['fut'].done():
+            return
+        sender = msg.get('sender')
+        c = self._cipher_for(sender)
+        if not c:
+            p['fut'].set_exception(RuntimeError(f"no key to decrypt file_read_result from {sender}"))
+            return
+        try:
+            data = decrypt(c, msg['payload'])
+        except Exception as e:
+            p['fut'].set_exception(e)
+            return
+        if data.get('error'):
+            p['fut'].set_exception(RuntimeError(data['error']))
+            return
+        p['chunks'][msg.get('seq', 0)] = data.get('data', '')
+        p['mime'] = data.get('mime') or p['mime']
+        p['got'] += 1
+        if p['total'] is None:
+            p['total'] = msg.get('total', 1)
+        if p['got'] >= p['total']:
+            p['fut'].set_result(''.join(p['chunks'][i] for i in sorted(p['chunks'])))
+
     async def _exec_remote_shell(self, device_name, cmd):
         self._log(f"[{ts()}] [infero] shell exec (remote -> {device_name}): {cmd[:60]}")
         tgt = self._cipher_for(device_name)
@@ -1369,13 +1431,20 @@ async def connect_instance(cfg):
                         payload = encrypt(cipher, {"stdout": "", "stderr": str(e), "exit_code": -1})
                     await ws.send(json.dumps({"type": "result", "req_id": req_id, "payload": payload}))
 
-                async def handle_file_read(payload_raw):
+                async def handle_file_read(payload_raw, origin=None):
+                    # origin: requesting device name (peer). None = browser requested.
+                    # Result is addressed with target=origin so the relay routes it back to
+                    # the requesting device instead of only to browsers.
                     req_id = ''
+                    def _wrap(extra):
+                        m = {'type': 'file_read_result', 'sender': DEVICE_NAME, **extra}
+                        if origin: m['target'] = origin
+                        return json.dumps(m)
                     try:
                         content = decrypt(cipher, payload_raw)
                         req_id = content.get('req_id', '')
                         path = os.path.expanduser(content.get('path', ''))
-                        log(cfg['relay_ws'], f"[{ts()}] [infero] file_read ({iid}): {path}")
+                        log(cfg['relay_ws'], f"[{ts()}] [infero] file_read ({iid}) from {origin or 'browser'}: {path}")
                         if not os.path.isfile(path):
                             raise FileNotFoundError(f'file not found: {path}')
                         size = os.path.getsize(path)
@@ -1387,14 +1456,10 @@ async def connect_instance(cfg):
                         chunk = 512 * 1024
                         parts = [b64[i:i + chunk] for i in range(0, len(b64), chunk)] or ['']
                         for i, c in enumerate(parts):
-                            await ws.send(json.dumps({
-                                'type': 'file_read_result', 'req_id': req_id, 'seq': i, 'total': len(parts),
-                                'sender': DEVICE_NAME,
+                            await ws.send(_wrap({'req_id': req_id, 'seq': i, 'total': len(parts),
                                 'payload': encrypt(cipher, {'data': c, 'mime': mime})}))
                     except Exception as e:
-                        await ws.send(json.dumps({
-                            'type': 'file_read_result', 'req_id': req_id, 'seq': 0, 'total': 1,
-                            'sender': DEVICE_NAME,
+                        await ws.send(_wrap({'req_id': req_id, 'seq': 0, 'total': 1,
                             'payload': encrypt(cipher, {'error': str(e)})}))
 
                 workers = {}  # being_id -> GenesisWorker
@@ -1420,7 +1485,10 @@ async def connect_instance(cfg):
                     if mtype == 'exec':
                         asyncio.create_task(handle_exec(msg['req_id'], msg['payload']))
                     elif mtype == 'file_read':
-                        asyncio.create_task(handle_file_read(msg['payload']))
+                        asyncio.create_task(handle_file_read(msg['payload'], msg.get('target')))
+                    elif mtype == 'file_read_result':
+                        for w in workers.values():
+                            w.on_file_read_result(msg)
                     elif mtype == 'loop_handoff':
                         w = get_worker(being_id)
                         log(cfg['relay_ws'], f"[{ts()}] [infero] MSG loop_handoff for being={being_id}, worker={w is not None}")

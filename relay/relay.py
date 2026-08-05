@@ -750,9 +750,18 @@ async def ws_handler(websocket):
             mtype = msg.get('type', '')
 
             # ─── Distributed loop messages (any role can send) ────────────
+            # file_read_result: back to the requesting device if targeted (device→device
+            # /view), else to browsers (browser-initiated read).
+            if mtype == 'file_read_result':
+                tgt = msg.get('target')
+                if tgt and f"{instance_id}:{tgt}" in device_conns:
+                    await send_to_device(instance_id, tgt, raw)
+                else:
+                    await send_to_browsers(instance_id, raw)
+                continue
             # Broadcast to all other nodes in this instance
-            # loop_status / rekeying_response / file_read_result: device→browsers only
-            if mtype in ('loop_status', 'rekeying_response', 'file_read_result'):
+            # loop_status / rekeying_response: device→browsers only
+            if mtype in ('loop_status', 'rekeying_response'):
                 await send_to_browsers(instance_id, raw)
                 continue
             if mtype in ('stream_token', 'exec_display', 'settings_update'):
