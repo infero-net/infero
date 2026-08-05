@@ -477,9 +477,21 @@ class GenesisWorker:
         # Store realtime separately for infer() to use
         self._last_realtime = realtime
 
-    async def infer(self):
+    # Overload fallback chain (anthropic API ids). On overloaded_error / HTTP 529
+    # the request is retried down this chain starting after the current model.
+    _OVERLOAD_CHAIN = ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8']
+
+    def _next_overload_model(self, current):
+        chain = self._OVERLOAD_CHAIN
+        try:
+            i = chain.index(current)
+        except ValueError:
+            return None  # current not in chain — no defined downgrade
+        return chain[i + 1] if i + 1 < len(chain) else None
+
+    async def infer(self, model_override=None):
         fmt = self.llm_settings.get('format', 'openai')
-        model = self.llm_settings.get('model', '')
+        model = model_override or self.llm_settings.get('model', '')
         endpoint = self.llm_settings.get('endpoint', '')
         api_token = self.llm_settings.get('token', '')
         thinking = self.llm_settings.get('thinking', False)
@@ -533,6 +545,13 @@ class GenesisWorker:
                             self.metadata['cacheName'] = None
                             self.metadata['cachedLength'] = 0
                             return await self.infer()
+                        # Overloaded (529 or overloaded_error) — downgrade model
+                        if resp.status == 529 or 'overloaded' in err_body.lower():
+                            nxt = self._next_overload_model(model)
+                            if nxt:
+                                self._log(f"[{ts()}] [infero] {model} overloaded → falling back to {nxt}")
+                                self.consciousness += f"System - [Model] {model} overloaded, falling back to {nxt}.\n\n"
+                                return await self.infer(model_override=nxt)
                         self.consciousness += f"System - [Error] HTTP {resp.status}: {err_body[:200]}\n\n"
                         return None
                     buffer = ""
@@ -573,6 +592,13 @@ class GenesisWorker:
                                     self.metadata['cachedLength'] = 0
                                     await self._maybe_refresh_cache({}, force=True)
                                     return await self.infer()
+                                # Overloaded_error mid-stream (HTTP 200) — downgrade model
+                                if 'overloaded' in err_msg.lower() and not ai_text:
+                                    nxt = self._next_overload_model(model)
+                                    if nxt:
+                                        self._log(f"[{ts()}] [infero] {model} overloaded → falling back to {nxt}")
+                                        self.consciousness += f"System - [Model] {model} overloaded, falling back to {nxt}.\n\n"
+                                        return await self.infer(model_override=nxt)
                                 self.consciousness += f"System - [Error] {err_msg[:200]}\n\n"
                                 return None
 

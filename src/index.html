@@ -255,25 +255,37 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 return aiText;
             }
 
+            window._overloadModel = null;  // fresh cycle starts from configured model
             let aiText;
-            try {
-                aiText = await streamLLM();
-            } catch (e) {
-                if (cacheName && e.message.includes('CachedContent')) {
-                    aiDiv.remove();
-                    appendMsgUI('system', 'Cache expired, rebuilding...');
-                    cacheName = null;
-                    cachedLength = 0;
-                    _cachedStableHead = null;
-                    await maybeRefreshCache(true);
-                    setStatus('Inferring...');
-                    aiDiv = appendMsgUI('ai', '');
+            while (true) {
+                try {
                     aiText = await streamLLM();
-                } else {
-                    const prev = aiDiv.previousElementSibling;
-                    if (prev?.classList.contains('msg-timestamp')) prev.remove();
-                    aiDiv.remove();
-                    throw e;
+                    break;
+                } catch (e) {
+                    const nxt = /overloaded|HTTP 529/i.test(e.message) ? nextOverloadModel(getActiveModel()) : null;
+                    if (nxt) {
+                        window._overloadModel = nxt;
+                        aiDiv.remove();
+                        appendMsgUI('system', `Model overloaded, falling back to ${nxt}...`);
+                        setStatus('Inferring...');
+                        aiDiv = appendMsgUI('ai', '');
+                        continue;  // retry down the chain (multi-hop)
+                    } else if (cacheName && e.message.includes('CachedContent')) {
+                        aiDiv.remove();
+                        appendMsgUI('system', 'Cache expired, rebuilding...');
+                        cacheName = null;
+                        cachedLength = 0;
+                        _cachedStableHead = null;
+                        await maybeRefreshCache(true);
+                        setStatus('Inferring...');
+                        aiDiv = appendMsgUI('ai', '');
+                        continue;
+                    } else {
+                        const prev = aiDiv.previousElementSibling;
+                        if (prev?.classList.contains('msg-timestamp')) prev.remove();
+                        aiDiv.remove();
+                        throw e;
+                    }
                 }
             }
 
@@ -1550,7 +1562,14 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         }
         function saveSettingsToStorage(s) { localStorage.setItem('genesis_settings', JSON.stringify(s)); }
         var settings = loadSettings();
+        // Overload fallback chain (anthropic API ids), mirrors agent.py _OVERLOAD_CHAIN.
+        const OVERLOAD_CHAIN = ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8'];
+        function nextOverloadModel(current) {
+            const i = OVERLOAD_CHAIN.indexOf(current);
+            return (i !== -1 && i + 1 < OVERLOAD_CHAIN.length) ? OVERLOAD_CHAIN[i + 1] : null;
+        }
         function getActiveModel() {
+            if (window._overloadModel) return window._overloadModel;  // active overload downgrade
             if (settings.model === 'custom') return settings.customModel;
             const m = MODEL_LIST[settings.model];
             if (!m) return settings.model;
