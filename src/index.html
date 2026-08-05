@@ -47,14 +47,10 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
 
         async function loop() {
             if (settings.hostDevice !== 'this browser') return;  // not our turn
-            if (_loopAborted) { _loopAborted = false; return; }  // abort before this cycle even starts
             try {
                 await perceive();                                 // Res Extensa, passio
-                if (_loopAborted) { _loopAborted = false; return; }
                 const B = await infer();                          // Res Cogitans
-                if (_loopAborted) { _loopAborted = false; return; }  // aborted during/after inference — skip act
                 await act(B);                                     // Res Extensa, actio
-                if (_loopAborted) { _loopAborted = false; return; }  // aborted during act — do not continue the loop
 
                 // Check for pending handoff before continuing
                 if (_pendingHandoff) {
@@ -76,11 +72,10 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                         const t = setTimeout(r, 1000);
                         currentAbortController.signal.addEventListener('abort', () => { clearTimeout(t); r(); });
                     });
-                    if (_loopAborted || currentAbortController?.signal.aborted) { _loopAborted = false; return; }
+                    if (currentAbortController?.signal.aborted) return;
                     return loop();
                 }
             } catch (e) {
-                if (_loopAborted) { _loopAborted = false; return; }  // user aborted — clean exit
                 if (e.name === 'AbortError' && e._kind !== 'timeout') return;  // user stopped, clean exit
                 console.error(e);
                 const label = e._kind === 'timeout' ? 'Timeout'
@@ -96,7 +91,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                     const t = setTimeout(r, 15000);
                     currentAbortController.signal.addEventListener('abort', () => { clearTimeout(t); r(); });
                 });
-                if (_loopAborted || currentAbortController?.signal.aborted) { _loopAborted = false; return; }  // user aborted during wait
+                if (currentAbortController?.signal.aborted) return;  // user aborted during wait
                 return loop();
             }
         }
@@ -2186,7 +2181,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         var cacheName = null;            // Gemini cache ID
         var _cachedStableHead = null;    // in-memory only; gemini cache invalidates if stableHead changes mid-session
         var loopRunning = false;
-        var _loopAborted = false;        // user hit Abort — checked at every loop phase boundary
         var currentUserInput = null;
         var currentAbortController = null;
         var _saveBeingTimer = null;
@@ -4211,7 +4205,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             clearTimeout(autoInferTimer);
             input.value = '';
             if (loopRunning || dispatchTimer !== null) {
-                _loopAborted = true;  // stop the in-flight cycle at the next phase boundary; new input starts a fresh one
                 clearTimeout(dispatchTimer); dispatchTimer = null;
                 if (currentAbortController) { currentAbortController.abort(); currentAbortController = null; }
             }
@@ -4239,7 +4232,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             const empty = !input.value.trim();
             const remoteRunning = settings.hostDevice !== 'this browser' && window._remoteAiDiv;
             if ((loopRunning || dispatchTimer !== null || remoteRunning) && empty) {
-                _loopAborted = true;  // bail at the next loop phase boundary (covers act/waits, not just fetch)
                 clearTimeout(dispatchTimer); dispatchTimer = null;
                 if (currentAbortController) { currentAbortController.abort(); currentAbortController = null; }
                 if (remoteRunning && _relayWs && _relayConnected) {
@@ -4258,7 +4250,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     }
                     return;
                 }
-                _loopAborted = false;
                 loopRunning = true;
                 updateSendBtn();
                 setStatus('Inferring...');
@@ -4343,7 +4334,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             dispatchTimer = setTimeout(() => {
                 dispatchTimer = null;
                 if (loopRunning || !currentUserInput) return;
-                _loopAborted = false;
                 loopRunning = true;
                 updateSendBtn();
                 setStatus('Inferring...');
@@ -4362,7 +4352,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             clearTimeout(autoInferTimer);
             autoInferTimer = setTimeout(() => {
                 if (loopRunning) return;
-                _loopAborted = false;
                 loopRunning = true;
                 updateSendBtn();
                 setStatus('Inferring...');
