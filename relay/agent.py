@@ -244,7 +244,7 @@ class GenesisWorker:
     def wake_me_up_when(self, sec):
         """Schedule a trigger after `sec` seconds."""
         self._log(f"  [wake_me_up_when] {sec}s")
-        asyncio.get_event_loop().call_later(sec, lambda: self.triggers.put_nowait(f"[timer] {sec}s elapsed"))
+        asyncio.get_running_loop().call_later(sec, lambda: self.triggers.put_nowait(f"[timer] {sec}s elapsed"))
 
     def _trigger_file_path(self):
         d = self._being_dir()
@@ -1175,6 +1175,7 @@ class GenesisWorker:
                 '_print': _real_print,
                 'print': lambda *a, **kw: _real_print(*a, file=stdout_capture, **kw),
                 'trigger': lambda value: loop.call_soon_threadsafe(self.triggers.put_nowait, str(value)),
+                'wake_me_up_when': self.wake_me_up_when,  # bare name, matches [Realtime] doc
             }
             # Sync exec stays on the loop thread — being code relies on
             # get_event_loop()/create_task. Only async main() gets the 30s
