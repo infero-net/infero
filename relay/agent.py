@@ -1204,7 +1204,7 @@ class GenesisWorker:
         payload = encrypt(tgt, {'cmd': f'python3 -c """{code}"""'})
         fut = asyncio.get_running_loop().create_future()
         self._pending_exec[req_id] = fut
-        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'payload': payload})
+        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'origin': DEVICE_NAME, 'payload': payload})
         try:
             raw = await asyncio.wait_for(fut, timeout=35)
             data = decrypt(tgt, raw)
@@ -1306,7 +1306,8 @@ class GenesisWorker:
         payload = encrypt(tgt, {'cmd': cmd})
         fut = asyncio.get_running_loop().create_future()
         self._pending_exec[req_id] = fut
-        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'payload': payload})
+        # origin: so the target's result is routed back to us, not only to browsers.
+        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'origin': DEVICE_NAME, 'payload': payload})
         try:
             result = await asyncio.wait_for(fut, timeout=35)
             data = decrypt(tgt, result)
@@ -1421,15 +1422,19 @@ async def connect_instance(cfg):
                 _key_label = 'key:saved' if _key_source == 'saved' else 'key:new (awaiting browser pairing)' if _key_source == 'fresh' else 'key:legacy'
                 log(cfg['relay_ws'], f"[{ts()}] [infero] Connected: {DEVICE_NAME} -> {iid}... | {_key_label} | verify: {vwords}")
                 print(f"[infero] verify: {vwords}", flush=True)
-                async def handle_exec(req_id, payload_raw):
+                async def handle_exec(req_id, payload_raw, origin=None):
+                    # origin: requesting peer device. Echoed as target so the relay routes the
+                    # result back to it (device→device exec), not only to browsers.
                     try:
                         cmd = decrypt(cipher, payload_raw)['cmd']
-                        log(cfg['relay_ws'], f"[{ts()}] [infero] exec ({iid}): {cmd[:60]}")
+                        log(cfg['relay_ws'], f"[{ts()}] [infero] exec ({iid}) from {origin or 'browser'}: {cmd[:60]}")
                         r = await run_shell_detached(cmd)
                         payload = encrypt(cipher, r)
                     except Exception as e:
                         payload = encrypt(cipher, {"stdout": "", "stderr": str(e), "exit_code": -1})
-                    await ws.send(json.dumps({"type": "result", "req_id": req_id, "payload": payload}))
+                    m = {"type": "result", "req_id": req_id, "payload": payload}
+                    if origin: m["target"] = origin
+                    await ws.send(json.dumps(m))
 
                 async def handle_file_read(payload_raw, origin=None):
                     # origin: requesting device name (peer). None = browser requested.
@@ -1483,7 +1488,7 @@ async def connect_instance(cfg):
                     if mtype not in ('stream_token',):  # log all except noisy stream_token
                         log(cfg['relay_ws'], f"[{ts()}] [infero] MSG_RAW type={mtype} being={being_id} keys={list(msg.keys())}")
                     if mtype == 'exec':
-                        asyncio.create_task(handle_exec(msg['req_id'], msg['payload']))
+                        asyncio.create_task(handle_exec(msg['req_id'], msg['payload'], msg.get('origin')))
                     elif mtype == 'file_read':
                         asyncio.create_task(handle_file_read(msg['payload'], msg.get('target')))
                     elif mtype == 'file_read_result':

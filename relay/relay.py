@@ -876,9 +876,14 @@ async def ws_handler(websocket):
                     save_tokens()
                     continue
 
-                # Forward result to all browsers
+                # Forward exec result: back to the requesting device if targeted
+                # (device→device exec), else to browsers (browser-initiated).
                 if msg.get('type') == 'result':
-                    await send_to_browsers(instance_id, raw)
+                    tgt = msg.get('target')
+                    if tgt and f"{instance_id}:{tgt}" in device_conns:
+                        await send_to_device(instance_id, tgt, raw)
+                    else:
+                        await send_to_browsers(instance_id, raw)
 
     except websockets.exceptions.ConnectionClosed:
         pass
