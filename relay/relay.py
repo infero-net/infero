@@ -781,6 +781,26 @@ async def ws_handler(websocket):
                 else:
                     await broadcast_to_instance(instance_id, raw, exclude_ws=websocket)
                 continue
+            # exec: forward to the target device. Any role may send — a browser host OR
+            # a device host (device→device exec). On failure, reply to the sender directly
+            # (echo origin as target so a device requester's on_file/exec handler matches).
+            if mtype == 'exec':
+                target_key = f"{instance_id}:{msg.get('device_name', '')}"
+                target = device_conns.get(target_key)
+                if target:
+                    try:
+                        await target['ws'].send(raw)
+                    except Exception as e:
+                        err = {'type': 'result', 'req_id': msg.get('req_id', ''), 'error': f'Device unreachable: {e}'}
+                        if msg.get('origin'): err['target'] = msg['origin']
+                        try: await websocket.send(json.dumps(err))
+                        except Exception: pass
+                else:
+                    err = {'type': 'result', 'req_id': msg.get('req_id', ''), 'error': f"Device not connected: {msg.get('device_name')}"}
+                    if msg.get('origin'): err['target'] = msg['origin']
+                    try: await websocket.send(json.dumps(err))
+                    except Exception: pass
+                continue
             # Also forward exec_request/exec_result to browsers (browser as exec target)
             if mtype == 'browser_exec_request':
                 await send_to_browsers(instance_id, raw)
@@ -834,35 +854,6 @@ async def ws_handler(websocket):
                         except Exception:
                             pass
                     continue
-
-                # Forward exec to device
-                if msg.get('type') == 'exec':
-                    target_key = f"{instance_id}:{msg.get('device_name', '')}"
-                    target = device_conns.get(target_key)
-                    if target:
-                        try:
-                            await target['ws'].send(raw)
-                        except Exception as e:
-                            # Device disconnected; notify browser
-                            err = json.dumps({
-                                'type': 'result',
-                                'req_id': msg.get('req_id', ''),
-                                'error': f'Device unreachable: {e}'
-                            })
-                            try:
-                                await websocket.send(err)
-                            except Exception:
-                                pass
-                    else:
-                        err = json.dumps({
-                            'type': 'result',
-                            'req_id': msg.get('req_id', ''),
-                            'error': f"Device not connected: {msg.get('device_name')}"
-                        })
-                        try:
-                            await websocket.send(err)
-                        except Exception:
-                            pass
 
             elif role == 'device':
                 if msg.get('type') == 'device_remove_self':
