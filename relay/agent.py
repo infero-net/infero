@@ -760,6 +760,27 @@ class GenesisWorker:
             return py if isinstance(py, str) and py.strip() else None
         return None
 
+    def _skill_globals(self, stdout_capture=None):
+        """Bare-name affordances exposed to being/skill python code. Single source of
+        truth so the runtime (_exec_python) and boot (_init_skill_code) paths stay
+        in sync — a name added here reaches both."""
+        import io
+        loop = asyncio.get_running_loop()
+        _real_print = print
+        if stdout_capture is None:
+            stdout_capture = io.StringIO()
+        return {
+            'agent': self,
+            'asyncio': asyncio,
+            'os': __import__('os'),
+            'json': __import__('json'),
+            '__builtins__': __builtins__,
+            '_print': _real_print,
+            'print': lambda *a, **kw: _real_print(*a, file=stdout_capture, **kw),
+            'trigger': lambda value: loop.call_soon_threadsafe(self.triggers.put_nowait, str(value)),
+            'wake_me_up_when': self.wake_me_up_when,
+        }
+
     def _init_skill_code(self):
         """At handoff time, try to run each skill's shell code once. Errors are appended to
         consciousness so the Being can rewrite broken skills via its loop."""
@@ -780,7 +801,11 @@ class GenesisWorker:
             py = self._skill_python_code(v.get('code'))
             if py:
                 try:
-                    ns = {}
+                    # Same bare-name affordances the runtime /exec python path gives
+                    # (agent.py _exec_python) and the prompt documents. Without these,
+                    # skill code that uses bare `agent`/`trigger`/`wake_me_up_when`
+                    # NameErrors at boot even though it runs fine in the loop.
+                    ns = self._skill_globals()
                     exec(py, ns)
                     if callable(ns.get('install')):
                         ns['install'](self)
@@ -1168,20 +1193,8 @@ class GenesisWorker:
         self._log(f"[{ts()}] [infero] python exec: {code[:80]}")
         import io, traceback
         stdout_capture = io.StringIO()
-        _real_print = print
-        loop = asyncio.get_running_loop()
         try:
-            g = {
-                'agent': self,
-                'asyncio': asyncio,
-                'os': __import__('os'),
-                'json': __import__('json'),
-                '__builtins__': __builtins__,
-                '_print': _real_print,
-                'print': lambda *a, **kw: _real_print(*a, file=stdout_capture, **kw),
-                'trigger': lambda value: loop.call_soon_threadsafe(self.triggers.put_nowait, str(value)),
-                'wake_me_up_when': self.wake_me_up_when,  # bare name, matches [Realtime] doc
-            }
+            g = self._skill_globals(stdout_capture)
             # Sync exec stays on the loop thread — being code relies on
             # get_event_loop()/create_task. Only async main() gets the 30s
             # shell-exec contract: on timeout the loop advances, the task
