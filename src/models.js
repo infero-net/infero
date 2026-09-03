@@ -13,6 +13,8 @@ window.MODELS = {
     "nanogpt":    { "name": "NanoGPT", "format": "openai", "endpoint": "https://nano-gpt.com/api/v1/chat/completions" }
   },
   "models": [
+    { "name": "gemini-3.8-flash", "format": "gemini", "from": {
+      "infero": "gemini-3.8-flash", "google": "gemini-3.8-flash", "openrouter": "google/gemini-3.8-flash" , "nanogpt": "google/gemini-3.8-flash"}},
     { "name": "gemini-3.5-flash", "format": "gemini", "from": {
       "infero": "gemini-3.5-flash", "google": "gemini-3.5-flash", "openrouter": "google/gemini-3.5-flash" , "nanogpt": "google/gemini-3.5-flash"}},
     { "name": "gemini-3.1-pro", "format": "gemini", "from": {
@@ -27,6 +29,8 @@ window.MODELS = {
       "openai": "gpt-5.4-mini", "openrouter": "openai/gpt-5.4-mini" , "nanogpt": "openai/gpt-5.4-mini"}},
     { "name": "gpt-5.4-nano", "format": "openai", "stop": false, "from": {
       "openai": "gpt-5.4-nano", "openrouter": "openai/gpt-5.4-nano" , "nanogpt": "openai/gpt-5.4-nano"}},
+    { "name": "claude-fable-5.1", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
+      "anthropic": "claude-fable-5-1", "openrouter": "anthropic/claude-fable-5.1" , "nanogpt": "anthropic/claude-fable-5.1"}},
     { "name": "claude-fable-5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
       "anthropic": "claude-fable-5", "openrouter": "anthropic/claude-fable-5" , "nanogpt": "anthropic/claude-fable-5"}},
     { "name": "claude-opus-5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
