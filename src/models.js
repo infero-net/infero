@@ -23,6 +23,8 @@ window.MODELS = {
       "infero": "gemini-3.1-flash-lite-preview", "google": "gemini-3.1-flash-lite-preview", "openrouter": "google/gemini-3.1-flash-lite-preview" }},
     { "name": "gemini-3-flash", "format": "gemini", "from": {
       "infero": "gemini-3-flash-preview", "google": "gemini-3-flash-preview", "openrouter": "google/gemini-3-flash-preview" , "nanogpt": "google/gemini-3-flash-preview"}},
+    { "name": "gpt-6", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6", "openrouter": "openai/gpt-6" , "nanogpt": "openai/gpt-6"}},
     { "name": "gpt-5.4", "format": "openai", "stop": false, "from": {
       "openai": "gpt-5.4", "openrouter": "openai/gpt-5.4" , "nanogpt": "openai/gpt-5.4"}},
     { "name": "gpt-5.4-mini", "format": "openai", "stop": false, "from": {
