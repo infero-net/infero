@@ -43,6 +43,8 @@ window.MODELS = {
       "anthropic": "claude-opus-4-7", "openrouter": "anthropic/claude-opus-4.7" , "nanogpt": "anthropic/claude-opus-4.7"}},
     { "name": "claude-opus-4.6", "format": "anthropic", "maxContext": 128000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "from": {
       "anthropic": "claude-opus-4-6", "openrouter": "anthropic/claude-opus-4.6" , "nanogpt": "anthropic/claude-opus-4.6"}},
+    { "name": "claude-sonnet-5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
+      "infero": "claude-sonnet-5", "anthropic": "claude-sonnet-5", "openrouter": "anthropic/claude-sonnet-5" , "nanogpt": "anthropic/claude-sonnet-5"}},
     { "name": "claude-sonnet-4.6", "format": "anthropic", "from": {
       "anthropic": "claude-sonnet-4-6", "openrouter": "anthropic/claude-sonnet-4.6" , "nanogpt": "anthropic/claude-sonnet-4.6"}},
     { "name": "claude-haiku-4.5", "format": "anthropic", "from": {
