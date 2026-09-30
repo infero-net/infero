@@ -17,14 +17,18 @@ window.MODELS = {
       "infero": "gemini-3.8-flash", "google": "gemini-3.8-flash", "openrouter": "google/gemini-3.8-flash" , "nanogpt": "google/gemini-3.8-flash"}},
     { "name": "gemini-3.5-flash", "format": "gemini", "from": {
       "infero": "gemini-3.5-flash", "google": "gemini-3.5-flash", "openrouter": "google/gemini-3.5-flash" , "nanogpt": "google/gemini-3.5-flash"}},
+    { "name": "gemini-3.5-flash-lite", "format": "gemini", "from": {
+      "infero": "gemini-3.5-flash-lite", "google": "gemini-3.5-flash-lite", "openrouter": "google/gemini-3.5-flash-lite" , "nanogpt": "google/gemini-3.5-flash-lite"}},
     { "name": "gemini-3.1-pro", "format": "gemini", "from": {
       "infero": "gemini-3.1-pro-preview", "google": "gemini-3.1-pro-preview", "openrouter": "google/gemini-3.1-pro-preview" , "nanogpt": "google/gemini-3.1-pro-preview"}},
     { "name": "gemini-3.1-flash-lite", "format": "gemini", "from": {
-      "infero": "gemini-3.1-flash-lite-preview", "google": "gemini-3.1-flash-lite-preview", "openrouter": "google/gemini-3.1-flash-lite-preview" }},
+      "infero": "gemini-3.1-flash-lite", "google": "gemini-3.1-flash-lite", "openrouter": "google/gemini-3.1-flash-lite" , "nanogpt": "google/gemini-3.1-flash-lite"}},
     { "name": "gemini-3-flash", "format": "gemini", "from": {
       "infero": "gemini-3-flash-preview", "google": "gemini-3-flash-preview", "openrouter": "google/gemini-3-flash-preview" , "nanogpt": "google/gemini-3-flash-preview"}},
-    { "name": "gpt-6", "format": "openai", "stop": false, "from": {
-      "openai": "gpt-6", "openrouter": "openai/gpt-6" , "nanogpt": "openai/gpt-6"}},
+    { "name": "gpt-6.1-sol-pro", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.1-sol-pro", "openrouter": "openai/gpt-6.1-sol-pro" , "nanogpt": "openai/gpt-6.1-sol-pro"}},
+    { "name": "gpt-6.1-sol", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.1-sol", "openrouter": "openai/gpt-6.1-sol" , "nanogpt": "openai/gpt-6.1-sol"}},
     { "name": "gpt-5.4", "format": "openai", "stop": false, "from": {
       "openai": "gpt-5.4", "openrouter": "openai/gpt-5.4" , "nanogpt": "openai/gpt-5.4"}},
     { "name": "gpt-5.4-mini", "format": "openai", "stop": false, "from": {
@@ -35,6 +39,8 @@ window.MODELS = {
       "anthropic": "claude-fable-5-1", "openrouter": "anthropic/claude-fable-5.1" , "nanogpt": "anthropic/claude-fable-5.1"}},
     { "name": "claude-fable-5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
       "anthropic": "claude-fable-5", "openrouter": "anthropic/claude-fable-5" , "nanogpt": "anthropic/claude-fable-5"}},
+    { "name": "claude-opus-5.5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
+      "infero": "claude-opus-5-5", "anthropic": "claude-opus-5-5", "openrouter": "anthropic/claude-opus-5.5" , "nanogpt": "anthropic/claude-opus-5.5"}},
     { "name": "claude-opus-5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
       "infero": "claude-opus-5", "anthropic": "claude-opus-5", "openrouter": "anthropic/claude-opus-5" , "nanogpt": "anthropic/claude-opus-5"}},
     { "name": "claude-opus-4.8", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
@@ -43,30 +49,46 @@ window.MODELS = {
       "anthropic": "claude-opus-4-7", "openrouter": "anthropic/claude-opus-4.7" , "nanogpt": "anthropic/claude-opus-4.7"}},
     { "name": "claude-opus-4.6", "format": "anthropic", "maxContext": 128000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "from": {
       "anthropic": "claude-opus-4-6", "openrouter": "anthropic/claude-opus-4.6" , "nanogpt": "anthropic/claude-opus-4.6"}},
+    { "name": "claude-sonnet-5.5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
+      "infero": "claude-sonnet-5-5", "anthropic": "claude-sonnet-5-5", "openrouter": "anthropic/claude-sonnet-5.5" , "nanogpt": "anthropic/claude-sonnet-5.5"}},
     { "name": "claude-sonnet-5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
       "infero": "claude-sonnet-5", "anthropic": "claude-sonnet-5", "openrouter": "anthropic/claude-sonnet-5" , "nanogpt": "anthropic/claude-sonnet-5"}},
     { "name": "claude-sonnet-4.6", "format": "anthropic", "from": {
       "anthropic": "claude-sonnet-4-6", "openrouter": "anthropic/claude-sonnet-4.6" , "nanogpt": "anthropic/claude-sonnet-4.6"}},
     { "name": "claude-haiku-4.5", "format": "anthropic", "from": {
-      "anthropic": "claude-haiku-4-5-20251001", "openrouter": "anthropic/claude-haiku-4.5" }},
+      "anthropic": "claude-haiku-4-5", "openrouter": "anthropic/claude-haiku-4.5" }},
+    { "name": "deepseek-v4.1-flash", "format": "openai", "vision": false, "maxContext": 1000000, "from": {
+      "deepseek": "deepseek-v4.1-flash", "openrouter": "deepseek/deepseek-v4.1-flash" , "nanogpt": "deepseek/deepseek-v4.1-flash"}},
     { "name": "deepseek-v3.2", "format": "openai", "vision": false, "maxContext": 128000, "from": {
       "deepseek": "deepseek-chat", "openrouter": "deepseek/deepseek-v3.2" , "nanogpt": "deepseek/deepseek-v3.2"}},
     { "name": "deepseek-v4-pro", "format": "openai", "vision": false, "maxContext": 1000000, "from": {
       "deepseek": "deepseek-v4-pro", "openrouter": "deepseek/deepseek-v4-pro" , "nanogpt": "deepseek/deepseek-v4-pro"}},
     { "name": "deepseek-v4-flash", "format": "openai", "vision": false, "maxContext": 1000000, "from": {
       "deepseek": "deepseek-v4-flash", "openrouter": "deepseek/deepseek-v4-flash" , "nanogpt": "deepseek/deepseek-v4-flash"}},
+    { "name": "qwen3.8-max-prime", "format": "openai", "maxContext": 128000, "vision": true, "from": {
+      "dashscope": "qwen3.8-max-prime", "openrouter": "qwen/qwen3.8-max-prime" , "nanogpt": "qwen/qwen3.8-max-prime"}},
+    { "name": "qwen3.8-flash", "format": "openai", "maxContext": 128000, "vision": true, "from": {
+      "dashscope": "qwen3.8-flash", "openrouter": "qwen/qwen3.8-flash" , "nanogpt": "qwen/qwen3.8-flash"}},
     { "name": "qwen3.5-plus", "format": "openai", "maxContext": 128000, "vision": true, "from": {
       "dashscope": "qwen3.5-plus" , "nanogpt": "qwen/qwen3.5-plus"}},
     { "name": "qwen3.6-plus", "format": "openai", "maxContext": 128000, "vision": true, "from": {
       "dashscope": "qwen3.6-plus" }},
+    { "name": "glm-5.3", "format": "openai", "maxContext": 131072, "vision": true, "from": {
+      "zhipu": "glm-5.3", "openrouter": "z-ai/glm-5.3" , "nanogpt": "z-ai/glm-5.3"}},
+    { "name": "glm-5.3-flash", "format": "openai", "maxContext": 131072, "vision": true, "from": {
+      "zhipu": "glm-5.3-flash", "openrouter": "z-ai/glm-5.3-flash" , "nanogpt": "z-ai/glm-5.3-flash"}},
     { "name": "glm-5", "format": "openai", "maxContext": 131072, "vision": true, "from": {
-      "zhipu": "glm-5", "openrouter": "z-ai/glm-5" , "nanogpt": "zai-org/glm-5"}},
+      "zhipu": "glm-5", "openrouter": "z-ai/glm-5" , "nanogpt": "z-ai/glm-5"}},
     { "name": "glm-5.1", "format": "openai", "maxContext": 131072, "vision": true, "from": {
-      "dashscope": "glm-5.1", "openrouter": "z-ai/glm-5.1" , "nanogpt": "zai-org/glm-5.1"}},
+      "dashscope": "glm-5.1", "openrouter": "z-ai/glm-5.1" , "nanogpt": "z-ai/glm-5.1"}},
     { "name": "glm-5.2", "format": "openai", "maxContext": 131072, "vision": false, "from": {
-      "zhipu": "glm-5.2", "dashscope": "glm-5.2", "openrouter": "z-ai/glm-5.2" , "nanogpt": "zai-org/glm-5.2"}},
+      "zhipu": "glm-5.2", "dashscope": "glm-5.2", "openrouter": "z-ai/glm-5.2" , "nanogpt": "z-ai/glm-5.2"}},
+    { "name": "kimi-k3", "format": "openai", "maxContext": 256000, "vision": true, "from": {
+      "moonshot": "kimi-k3", "openrouter": "moonshotai/kimi-k3" , "nanogpt": "moonshotai/kimi-k3"}},
     { "name": "kimi-k2.5", "format": "openai", "maxContext": 256000, "vision": true, "from": {
       "moonshot": "kimi-k2.5", "openrouter": "moonshotai/kimi-k2.5", "dashscope": "kimi-k2.5" , "nanogpt": "moonshotai/kimi-k2.5"}},
+    { "name": "MiniMax-M3", "format": "openai", "maxContext": 256000, "vision": false, "from": {
+      "minimax": "MiniMax-M3", "openrouter": "minimax/minimax-m3" , "nanogpt": "minimax/minimax-m3"}},
     { "name": "MiniMax-M2.5", "format": "openai", "maxContext": 256000, "vision": false, "from": {
       "minimax": "MiniMax-M2.5", "dashscope": "MiniMax-M2.5", "openrouter": "minimax/minimax-m2.5" , "nanogpt": "minimax/minimax-m2.5"}},
     { "name": "MiniMax-M2.7", "format": "openai", "maxContext": 256000, "vision": false, "from": {
