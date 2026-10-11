@@ -168,16 +168,16 @@ Found on 2026-10-09/11 while testing the branch on dev2.infero.net, by hand and 
   `renderHistory()` finds user input; until there is one, fall back to the short id (`b_xxxxxxxx`).
 - **Covered by:** check 9, marked as a known failure until fixed.
 
-### Under investigation: a being showing another being's name
+### Observation (not a bug): two beings picking the same name
 
 Reported on dev2: A named itself, B was created during A's conversation, and after switching back and
-forth (with bug 8) B showed A's name with no input to B. Not reproduced: replaying that sequence with
-the fake LLM (A writes its name; B created mid-turn; switches including the refused picks; with the
-back/forward cache on, on `ef4e432` and on the fix) left B unnamed, and nothing in switching, saving,
-the tab locks or device sync copies a `name` between records. The likely explanation is B naming
-itself on its first real-LLM turn after reading A's record, which issue 5 allows. To check, search B's
-consciousness for the name (`consciousness.match(/.{0,80}<name>.{0,80}/g)`) and look for a `DB.put`
-that wrote it.
+forth (with bug 8) B showed the same name as A with no input to B. Tracing both beings' histories
+showed each chose the name on its own, so the match was a coincidence, not a leak between beings.
+Replaying the sequence with the fake LLM (A writes its name; B created mid-turn; switches including
+the refused picks; back/forward cache on, on `ef4e432` and on the fix) also left B unnamed, and nothing
+in switching, saving, the tab locks or device sync copies a `name` between records. Not tracked as a
+bug; if it recurs, search B's consciousness for the name (`consciousness.match(/.{0,80}<name>.{0,80}/g)`)
+and look for a `DB.put` that wrote it.
 
 ## The fix
 
