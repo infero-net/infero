@@ -43,8 +43,8 @@ python3 src/tests/test_shell_timeout.py
 
 Checks that beings sharing one browser stay separate: switching mid-loop, switching right after a
 write, leftover skill code, multiple tabs, and IndexedDB access between beings. Uses a local fake LLM,
-so it needs no API key. Issues 5 (no storage boundary between beings) and 9 (duplicate labels) are
-known failures; everything else should pass. `remote_host_test.py` (needs a deployed site, pairs a
+so it needs no API key. Issue 5 (no storage boundary between beings) is a
+known failure; everything else should pass. `remote_host_test.py` (needs a deployed site, pairs a
 throwaway device) covers handoff to a remote host after a switch. See `multi_being_isolation/README.md`
 for the issues, bug reports, fixes, repro steps and results.
 

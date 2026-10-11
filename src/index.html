@@ -2302,6 +2302,26 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         window.addEventListener('resize', pinBodyHeight);
         pinBodyHeight();
 
+        // The human's first message, parsed the way renderHistory() finds user input: the text after
+        // the first blank line of a [System Environment] block. '' if the human hasn't spoken yet.
+        function _firstUserText(text) {
+            for (const block of text.split(/\n\n(?=\[System Environment\]|\*\*(?:Digital Being|Assistant) - |System - \[)/)) {
+                const trimmed = block.trim();
+                if (!trimmed.startsWith('[System Environment]')) continue;
+                const envEnd = trimmed.search(/\n\n/);
+                if (envEnd === -1) continue;
+                const rest = trimmed.slice(envEnd + 2).trim();
+                if (rest && !rest.startsWith('[System') && !rest.startsWith('System -')) return rest;
+            }
+            return '';
+        }
+
+        // Older saves used the being's id, or a line of its own reply such as '/call_for_human',
+        // as the title; those make every unnamed being look alike, so the picker skips them.
+        function _usableTitle(title, id) {
+            return !!title && title !== id && !title.startsWith('/');
+        }
+
         async function loadBeingsList() {
             const beings = (await DB.list()).filter(s => !s.id.includes('/'));
             beingSelect.innerHTML = '';
@@ -2309,7 +2329,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 const opt = document.createElement('option');
                 opt.value = s.id;
                 const fallback = /^[0-9a-f]{16,}$/.test(s.id) ? ('b_' + s.id.slice(0, 8)) : s.id;
-                opt.textContent = s.name || s.title || fallback;
+                opt.textContent = s.name || (_usableTitle(s.title, s.id) ? s.title : fallback);
                 beingSelect.appendChild(opt);
             });
             if(currentBeingId) beingSelect.value = currentBeingId;
@@ -2330,11 +2350,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
             const existing = await DB.get(currentBeingId);
             const name = existing?.name || '';
-            let title = existing?.title || currentBeingId;
-            const userMatch = consciousness.match(/\n\n(?!\[System|\*\*(?:Digital Being|Assistant)|System -)([^\n].{0,30})/);
-            if (userMatch) {
-                title = userMatch[1].replace(/\n/g, ' ').trim().substring(0, 15) + '...';
-            }
+            // Title = the start of the human's first message; until there is one, the picker shows the short id
+            const firstUser = _firstUserText(consciousness);
+            const title = firstUser ? firstUser.replace(/\s+/g, ' ').substring(0, 15) + '...'
+                : (_usableTitle(existing?.title, currentBeingId) ? existing.title : '');
             await DB.put({ id: currentBeingId, name, title, cachedLength, cacheName, promptTokens: _lastPromptTokens, cachedTokens: _lastCachedTokens, updatedAt: Date.now() });
             await DB.put({ id: `${currentBeingId}/consciousness.txt`, value: consciousness });
             try {

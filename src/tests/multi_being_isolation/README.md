@@ -6,9 +6,9 @@ opening a second tab, could write one being's work into another, lose it, or wak
 
 Issues 1–4 are fixed on branch `fix/multi-being-isolation`. Issue 5 needs a design decision and is
 left open. Testing the fixes on dev2.infero.net turned up four more bugs (6–9): three in the fixes
-themselves, now fixed, and one older labelling bug, still open. `multi_being_isolation_test.py` and
+themselves and one older labelling bug, all now fixed. `multi_being_isolation_test.py` and
 `remote_host_test.py` in this folder cover all nine; on `dev` at `a1fad55` the main test fails every
-fixable check, and with the fixes only the known failures (5, 9) remain.
+fixable check, and with the fixes only issue 5's known failures remain.
 
 | # | Problem | Severity | Status |
 |---|---|---|---|
@@ -20,7 +20,7 @@ fixable check, and with the fixes only the known failures (5, 9) remain.
 | 6 | After a switch, a paired device host never got the new being | High | **Fixed** (commit 4); regression from commit 2 |
 | 7 | Two tabs saving settings at once could still drop a paired device | Medium | **Fixed** (commits 5, 6); gap in commit 3 |
 | 8 | Switching back to a being in the same tab refused as "open in another tab" | Medium | **Fixed** (commit 6); regression from commit 3 |
-| 9 | Beings that haven't named themselves get the same label in the picker | Low | Open; predates this branch (`72114fe`) |
+| 9 | Beings that haven't named themselves get the same label in the picker | Low | **Fixed** (commit 7); predates this branch (`72114fe`) |
 
 Line numbers below refer to `src/index.html` at `a1fad55` and are approximate.
 
@@ -155,18 +155,27 @@ Found on 2026-10-09/11 while testing the branch on dev2.infero.net, by hand and 
 - **Covered by:** check 8 (one pick, no retry, Chromium with the back/forward cache on). On `ef4e432`
   (before the fix) it fails: "on B; 'open in another tab' notice=True".
 
-### 9. Beings that haven't named themselves get the same label (open)
+### 9. Beings that haven't named themselves get the same label (fixed)
 
-- **Symptom:** two beings show the same label in the being picker, for example `/call_for_human...`.
-- **Repro:** create two beings and don't type to either; let each finish its first turn.
-- **Cause:** a being without a `name` is labelled with its `title`, which `saveBeing()` recomputes on
+- **Symptom:** every being that hasn't named itself shows `/call_for_human...` in the being picker,
+  and keeps that label after the human talks to it.
+- **Repro:** create two beings and let each finish its automatic first turn; then type to one of
+  them. Reproduced on dev2.infero.net (2026-10-11) with first replies that were identical, differed
+  only after 15 characters, differed from the first word, or were code only: all labelled
+  `/call_for_human...`, before and after typing.
+- **Cause:** a being without a `name` is labelled with its `title`, which `saveBeing()` recomputed on
   every save as the first paragraph of the consciousness that doesn't start with a system marker
-  (`[System`, `**Digital Being`, `System -`). For a being that spoke first, that paragraph is part of
-  its own reply, often just `/call_for_human` or a stock opening line, so labels collide. Unchanged
-  since `72114fe` (2026-03-29); switching only made it visible sooner, since a switch saves at once.
-- **Proposed fix (not done):** build the title only from the human's first message, parsed the way
-  `renderHistory()` finds user input; until there is one, fall back to the short id (`b_xxxxxxxx`).
-- **Covered by:** check 9, marked as a known failure until fixed.
+  (`[System`, `**Digital Being`, `System -`). A fresh being's first reply sits right under its
+  `**Digital Being` header with no blank line, so it's skipped; the first paragraph that counts is the
+  `/call_for_human` that ends the reply. Because it's always the first match, later messages never
+  change it. A being with no turn yet was labelled with its full 66-character id, since its title
+  started out as the id, so the short-id fallback (`b_xxxxxxxx`) was never shown. Unchanged since
+  `72114fe` (2026-03-29); switching only made it visible sooner, since a switch saves at once.
+- **Fix (commit 7):** the title is the start of the human's first message, parsed the way
+  `renderHistory()` finds user input (`_firstUserText`); until there is one the title is empty and
+  the picker shows `b_xxxxxxxx`. The picker also ignores old titles that equal the id or start with
+  `/` (`_usableTitle`), so beings saved before the fix don't keep `/call_for_human...` until reopened.
+- **Covered by:** check 9 (three checks).
 
 ### Observation (not a bug): two beings picking the same name
 
@@ -192,6 +201,7 @@ in different tabs still run at the same time, since each tab is a separate page.
 | 4 `fix: hand the being to the remote host after a switch reload` | An empty sync from an idle host hands the current being over. | 6 |
 | 5 `fix: merge concurrent settings saves across tabs` | Saves are a 3-way merge: write only what this tab changed since it last read storage onto the current stored copy. | 7 (partly) |
 | 6 `fix: same-tab switch refused as "open in another tab"; stale-read-safe device merge` | Release the being's lock before navigating; reload a page restored from the back/forward cache. Devices merge as a union with removal markers, and a tab re-publishes a device another tab's stale save dropped. | 7, 8 |
+| 7 `fix: label unnamed beings by the human's first message` | `saveBeing()` titles a being from the human's first message, or leaves the title empty so the picker shows the short id; the picker skips old titles that are the id or start with `/`. | 9 |
 
 Trade-offs:
 
@@ -232,7 +242,7 @@ How it works:
   other engines.
 - A refused pick in the being picker is retried, as a user would, so the other checks still run on
   code with bug 8; check 8 alone tests that the first pick works.
-- Each check asserts the **correct** behaviour. Checks for issues 5 and 9 are marked known failures.
+- Each check asserts the **correct** behaviour. Checks for issue 5 are marked known failures.
   Exit code 0 = no failures other than known ones, 1 = any other failure.
 
 Harness notes: the test blocks hosts with Chromium's `--host-resolver-rules` rather than
@@ -254,7 +264,9 @@ Playwright call, so routed requests stall during `time.sleep()`. It polls on a t
 | 4d | Open tab 3 at `index.html?being=<A>` while tab 1 has A open | tab 3 opens another being |
 | 5 | From B, list keys under `<A>/`; write `<A>/probe` | B can neither read nor write A's records (known failure) |
 | 8 | In one tab switch A → B, then pick A once (no retry) | tab is on A, no "open in another tab" notice |
-| 9 | Right after setup, before any input, read the picker labels of A and B | labels differ (known failure) |
+| 9 | Right after setup, before any input, read the picker labels of A and B | labels differ |
+| 9 | New being C finishes its first turn; send `TASK-LABEL9 hello` | C's label is `TASK-LABEL9 hel...` |
+| 9 | Store a record with a hex id and title `/call_for_human...` | its label is `b_01234567` |
 
 ### Remote-host test (bug 6)
 
@@ -279,7 +291,14 @@ script (see Further testing).
 
 ## Results
 
-### Latest (2026-10-11, after commit 6)
+### Latest (2026-10-12, after commit 7)
+
+| Run | Result |
+|---|---|
+| Main test, Chromium, Firefox and WebKit | 14/16 passed each, 2 known (5 read, 5 write), 0 failures, exit 0 |
+| Main test on `16df906` (before commit 7) | all three check-9 checks FAIL: labels `/call_for_human...` for A and B, for C before and after typing, and for the old record |
+
+### After commit 6 (2026-10-11)
 
 | Run | Result |
 |---|---|

@@ -183,9 +183,9 @@ def launch(p):
 
 # --- Tests --------------------------------------------------------------------
 checks = []
-# Issue 5 needs a per-being origin or per-being encryption, issue 9 isn't fixed yet (see README.md);
-# their checks are expected to fail and don't affect the exit code. A pass is reported as UNEXPECTED.
-KNOWN = {5, 9}   # 9: duplicate labels for unnamed beings (open, see README.md)
+# Issue 5 needs a per-being origin or per-being encryption (see README.md);
+# its checks are expected to fail and don't affect the exit code. A pass is reported as UNEXPECTED.
+KNOWN = {5}
 
 
 def check(num, name, ok, detail):
@@ -322,10 +322,26 @@ def main():
             check(5, "B cannot write A's records", not wrote, f"B wrote {A[:8]}…/probe={wrote}")
 
             print("\n[9] Labels of beings that haven't named themselves")
-            # Bug: the title is the first non-system paragraph of the consciousness, which for a being
-            # that spoke first is part of its own reply (here '/call_for_human'), so labels collide.
+            # Bug: the title was the first non-system paragraph of the consciousness. A fresh being's
+            # auto first turn ends with '/call_for_human', so every unnamed being was labelled
+            # '/call_for_human...', and the human's messages never changed it.
             check(9, "two fresh beings get different labels in the being picker", labels["A"] != labels["B"],
                   f"A={labels['A']!r}, B={labels['B']!r}")
+            label_of = lambda bid: pg.evaluate("async id => { await loadBeingsList();"
+                                               " return [...beingSelect.options].find(o => o.value === id)?.textContent; }", bid)
+            new_being(pg); time.sleep(4); settle(pg)
+            C = pg.evaluate("() => currentBeingId")
+            before = label_of(C)
+            pg.evaluate("() => trigger('TASK-LABEL9 hello', 0)"); time.sleep(1); settle(pg)
+            after = label_of(C)
+            check(9, "the human's first message becomes the label", after == "TASK-LABEL9 hel...",
+                  f"before typing={before!r}, after={after!r}")
+            legacy = "0123456789abcdef" * 4
+            pg.evaluate("id => DB.put({id, name: '', title: '/call_for_human...', updatedAt: 1})", legacy)
+            old_label = label_of(legacy)
+            pg.evaluate("id => DB.del(id)", legacy)
+            check(9, "an old '/call_for_human...' title shows as the short id", old_label == "b_01234567",
+                  f"label={old_label!r}")
             br.close()
     finally:
         srv.shutdown()
