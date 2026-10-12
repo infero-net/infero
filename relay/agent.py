@@ -1,4 +1,4 @@
-import asyncio, json, subprocess, base64, hashlib, os, sys, socket, re, gzip, time
+import asyncio, json, subprocess, base64, hashlib, os, sys, socket, re, gzip, time, mimetypes
 from datetime import datetime
 import aiohttp
 
@@ -25,7 +25,7 @@ def _get_device_name():
 DEVICE_NAME = _get_device_name()
 
 def ts():
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')
 
 def get_log_file(relay_ws):
     """Return log file path. Windows always logs to file (no visible console under Task Scheduler).
@@ -148,7 +148,8 @@ class GenesisWorker:
         self.pending_user_input = None
         self._stopped_sent = False
         self._pending_exec = {}  # req_id -> asyncio.Future
-        self.devices = {}  # name -> {type, online}
+        self._pending_file_reads = {}  # req_id -> {fut, chunks, got, total, mime, sender}
+        self.devices = {}  # name -> {type, online, keyB64}
         self.hidden_devices = set()
         self.being_id = ''
         self._last_prompt_tokens = 0
@@ -197,7 +198,9 @@ class GenesisWorker:
             with open(st_path, 'r', encoding='utf-8') as f:
                 state = json.load(f)
             self.metadata = state.get('metadata', {})
-            self.llm_settings = state.get('llm_settings', {})
+            # Merge, don't replace: disk state may hold partial keys and must not
+            # clobber a full config seeded by settings_update/handoff.
+            self.llm_settings.update(state.get('llm_settings') or {})
             self.devices = state.get('devices', {})
             self.hidden_devices = set(state.get('hidden_devices', []))
             self._last_prompt_tokens = state.get('last_prompt_tokens', 0)
@@ -210,7 +213,7 @@ class GenesisWorker:
                     self.metadata = json.load(f)
             if os.path.exists(s_path):
                 with open(s_path, 'r', encoding='utf-8') as f:
-                    self.llm_settings = json.load(f)
+                    self.llm_settings.update(json.load(f) or {})
         self._log(f"[{ts()}] [infero] Loaded being {self.being_id} from disk: consciousness={len(self.consciousness)} chars")
         return True
 
@@ -241,7 +244,7 @@ class GenesisWorker:
     def wake_me_up_when(self, sec):
         """Schedule a trigger after `sec` seconds."""
         self._log(f"  [wake_me_up_when] {sec}s")
-        asyncio.get_event_loop().call_later(sec, lambda: self.triggers.put_nowait(f"[timer] {sec}s elapsed"))
+        asyncio.get_running_loop().call_later(sec, lambda: self.triggers.put_nowait(f"[timer] {sec}s elapsed"))
 
     def _trigger_file_path(self):
         d = self._being_dir()
@@ -275,6 +278,7 @@ class GenesisWorker:
             msgs.append(self.triggers.get_nowait())
         merged = '\n'.join(m for m in msgs if m)
         if merged:
+            self._woke_external = True
             self.consciousness += f"System - [Trigger] {merged}\n\n"
             self._log(f"[{ts()}] triggered ({len(msgs)} msgs): {merged[:200]}")
             await self.send_relay({'type': 'exec_display', 'sender': DEVICE_NAME,
@@ -326,7 +330,7 @@ class GenesisWorker:
                 with open(id_path, 'w', encoding='utf-8') as f:
                     json.dump(identity, f, ensure_ascii=False)
                 self._log(f"[{ts()}] [infero] identity synced to {id_path}")
-        self.llm_settings = data.get('settings', {})
+        self.llm_settings.update(data.get('settings') or {})
         self.devices = data.get('devices', {})
         self.hidden_devices = set(data.get('hiddenDevices', []))
         loop_was_running = data.get('loopWasRunning', False)
@@ -403,7 +407,7 @@ class GenesisWorker:
             if not cont:
                 break
 
-    def _build_realtime(self):
+    def _build_realtime(self, external_input=False):
         lines = ''
         # Self (this device, the current loop host)
         _os_info = 'Windows (PowerShell)' if sys.platform == 'win32' else ('macOS' if sys.platform == 'darwin' else 'Linux')
@@ -416,8 +420,9 @@ class GenesisWorker:
         lines += f'\n    - Memory: {INFERO_DIR}/beings/{self.being_id}/ — consciousness.txt (auto-saved, field: value), metadata.json, arbitrary files'
         lines += '\n    - Capabilities: persistent processes, file I/O, system access, any language/runtime'
         lines += f'\n    - Exec (MUST use this exact format — wrong format = code never executed):\n/exec shell {DEVICE_NAME}\n```bash\n<command>\n```'
-        lines += f'\n    - Python Exec (runs in agent process — can access agent internals, self-modify):\n/exec python {DEVICE_NAME}\n```python\n# agent = the Agent instance; print() captures output; set result = X for return value\n# trigger(value) wakes from /call_for_trigger; define async def main(): for async code\n```'
+        lines += f'\n    - Python Exec (runs in agent process — can access agent internals, self-modify):\n/exec python {DEVICE_NAME}\n```python\n# agent = the Agent instance; print() captures output; set result = X for return value\n# trigger(value) wakes from /call_for_trigger; define async def main(): for async code\n# async main() has a 30s timeout (like shell exec): on timeout it keeps running detached, output dropped; sync code must not block\n```'
         lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
+        lines += '\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; ≤5MB, jpeg/png/gif/webp; fades only when compression archives it). ref = local file path, http(s) URL, or <device>:<path> to read from an online peer device (≤5MB, key synced from browser).'
         lines += f'\n    - Trigger: echo "msg" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt to wake from /call_for_trigger. Use in nohup scripts for async callback. E.g.: nohup bash -c \'sleep 3600 && echo "1h timer" >> {INFERO_DIR}/beings/{self.being_id}/trigger.txt\' &'
         lines += '\n    - wake_me_up_when(sec): schedule a trigger after N seconds. No automatic watchdog — Being sleeps until triggered.'
         # Other devices
@@ -433,25 +438,30 @@ class GenesisWorker:
                 lines += '\n         .left-panel #chat-box + #input + #send-btn'
                 lines += '\n    - Memory: IndexedDB(\'GenesisDB\', store=\'beings\', keyPath=\'id\')'
                 lines += '\n    - Capabilities: DOM/UI, canvas/WebGL, fetch, IndexedDB, FileSystem API, Pyodide, WASM, Speech (neural TTS APIs preferred; WebSpeech as fallback), MediaDevices(camera, mic)'
-                lines += '\n    - Exec (MUST use this exact format — wrong format = code displayed as text, never executed):\n/exec browser\n```javascript\n// your code here\n// CRITICAL for canvas: never set canvas.width/height; use const { width: w, height: h } = document.getElementById(\'canvas-container\').getBoundingClientRect();\n// return value — use for immediate results (sync or async)\n// trigger(value) — use for deferred wakeup\n```'
+                lines += '\n    - Exec (MUST use this exact format — wrong format = code displayed as text, never executed):\n/exec browser\n```javascript\n// your code here\n// CRITICAL for canvas: host already sized the backing store and did ctx.scale(DPR), so you draw in CSS px.\n// Never READ canvas.width/height (device px, DPR× too big); never SET them (wipes the host\'s scale).\n// Take ALL coords/fonts from document.getElementById(\'canvas-container\').getBoundingClientRect().\n// return value — use for immediate results (sync or async): the value is passed to context right away.\n// trigger(value) — use for deferred wakeup: e.g. attach to a button click or async callback to resume the loop later when an event fires.\n```'
             else:
                 lines += f'\n  - {name}(online, {dtype})'
                 lines += '\n    - Capabilities: persistent processes, file I/O, system access, any language/runtime'
                 lines += f'\n    - Exec: /exec shell {name}\n```bash\n<command>\n```'
                 lines += '\n      (30s timeout: process keeps running but stdout/stderr detached, loop advances. Write output to file if needed after 30s.)'
-        return f'[Realtime]\nReminder: end with /self_continue or /call_for_trigger\nDevices:{lines}'
+        turn_note = ("New external input arrived this cycle."
+                     if external_input else
+                     "No new user input since your last message — what follows is only the result of your own previous action. Write only what is new this cycle.")
+        return f"[Realtime]\nReminder: end with /self_continue or /call_for_trigger\n{turn_note}\nDevices:{lines}"
 
     async def perceive(self):
         now = datetime.now()
         days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
         tz_offset = now.astimezone().strftime('%z')
         env = f"[System Environment]\nTime: {now.strftime('%Y-%m-%d %H:%M:%S')} (UTC{tz_offset})\nDay: {days[now.weekday()]}"
-        realtime = self._build_realtime()
-        # Build the full prompt context (env + realtime + user_input)
-        # but only persist env + user_input to consciousness (not realtime)
         user_input = self.pending_user_input
         if user_input:
             self.pending_user_input = None
+        external = bool(user_input) or getattr(self, '_woke_external', False)
+        self._woke_external = False
+        realtime = self._build_realtime(external)
+        # Build the full prompt context (env + realtime + user_input)
+        # but only persist env + user_input to consciousness (not realtime)
         if user_input == '__go__':
             user_input = None  # empty Go — just trigger loop, no text
         # What gets persisted to consciousness.txt (no [Realtime])
@@ -459,12 +469,30 @@ class GenesisWorker:
         if user_input:
             persist_parts.append(user_input)
         self.consciousness += '\n\n'.join(persist_parts) + '\n\n'
+        if user_input:
+            # Human /view lines load images too
+            for m in re.finditer(r'^/view +(\S+) *$', user_input + ('' if user_input.endswith('\n') else '\n'), re.MULTILINE):
+                r = await self._exec_view(m.group(1))
+                if r:
+                    self.consciousness += r
         # Store realtime separately for infer() to use
         self._last_realtime = realtime
 
-    async def infer(self):
+    # Overload fallback chain (anthropic API ids). On overloaded_error / HTTP 529
+    # the request is retried down this chain starting after the current model.
+    _OVERLOAD_CHAIN = ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8']
+
+    def _next_overload_model(self, current):
+        chain = self._OVERLOAD_CHAIN
+        try:
+            i = chain.index(current)
+        except ValueError:
+            return None  # current not in chain — no defined downgrade
+        return chain[i + 1] if i + 1 < len(chain) else None
+
+    async def infer(self, model_override=None):
         fmt = self.llm_settings.get('format', 'openai')
-        model = self.llm_settings.get('model', '')
+        model = model_override or self.llm_settings.get('model', '')
         endpoint = self.llm_settings.get('endpoint', '')
         api_token = self.llm_settings.get('token', '')
         thinking = self.llm_settings.get('thinking', False)
@@ -477,6 +505,8 @@ class GenesisWorker:
         if fmt == 'anthropic':
             headers['x-api-key'] = api_token
             headers['anthropic-version'] = '2023-06-01'
+            if any(k in model for k in ('fable-5', 'opus-5', 'mythos')):
+                headers['anthropic-beta'] = 'server-side-fallback-2026-06-01'
         elif fmt == 'openai':
             headers['Authorization'] = f'Bearer {api_token}'
         # Gemini uses query param
@@ -516,12 +546,24 @@ class GenesisWorker:
                             self.metadata['cacheName'] = None
                             self.metadata['cachedLength'] = 0
                             return await self.infer()
+                        # Overloaded (529 or overloaded_error) — downgrade model
+                        if resp.status == 529 or 'overloaded' in err_body.lower():
+                            nxt = self._next_overload_model(model)
+                            if nxt:
+                                self._log(f"[{ts()}] [infero] {model} overloaded → falling back to {nxt}")
+                                self.consciousness += f"System - [Model] {model} overloaded, falling back to {nxt}.\n\n"
+                                return await self.infer(model_override=nxt)
                         self.consciousness += f"System - [Error] HTTP {resp.status}: {err_body[:200]}\n\n"
                         return None
                     buffer = ""
                     _raw_tail = ""
                     _first_chunk_logged = False
                     async for chunk in resp.content.iter_any():
+                        # Abort: loop_stop sets self.running=False; break streaming immediately
+                        # instead of finishing the whole inference.
+                        if not self.running:
+                            self._log(f"[{ts()}] [infero] Infer aborted by loop_stop ({len(ai_text)} chars streamed)")
+                            return None
                         raw = chunk.decode('utf-8', errors='replace')
                         if not _first_chunk_logged:
                             self._log(f"[{ts()}] [infero] Infer first chunk: {repr(raw[:200])}")
@@ -556,6 +598,13 @@ class GenesisWorker:
                                     self.metadata['cachedLength'] = 0
                                     await self._maybe_refresh_cache({}, force=True)
                                     return await self.infer()
+                                # Overloaded_error mid-stream (HTTP 200) — downgrade model
+                                if 'overloaded' in err_msg.lower() and not ai_text:
+                                    nxt = self._next_overload_model(model)
+                                    if nxt:
+                                        self._log(f"[{ts()}] [infero] {model} overloaded → falling back to {nxt}")
+                                        self.consciousness += f"System - [Model] {model} overloaded, falling back to {nxt}.\n\n"
+                                        return await self.infer(model_override=nxt)
                                 self.consciousness += f"System - [Error] {err_msg[:200]}\n\n"
                                 return None
 
@@ -618,7 +667,7 @@ class GenesisWorker:
         self.metadata['promptTokens'] = usage.get('promptTokens', 0)
         self.metadata['cachedTokens'] = usage.get('cachedTokens', 0)
         await self._maybe_refresh_cache(usage)
-        time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        time_str = datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S UTC%z')
         clean_ai = re.sub(r'^\*{0,2}Digital Being\s*[-–—]\s*\[.*?\]\*{0,2}\n?', '', ai_text)
         self.consciousness += f"**Digital Being - [{time_str}]**\n{clean_ai}\n\n"
         return ai_text
@@ -697,14 +746,40 @@ class GenesisWorker:
         self._log(f"[{ts()}] [Compress] saved {log_name}, bridge={len(fresh)} entries ({len(bridge_block)} chars), tail={tail_chars}, total={len(self.consciousness)}")
 
     def _skill_shell_code(self, code):
-        """Pick the shell variant of a skill's code. String code is treated as shell (best-effort);
-        object code with .shell key uses that. Returns None if no shell impl is available."""
-        if isinstance(code, str):
-            return code if code.strip() else None
+        """Pick the shell variant of a skill's code. Only an explicit code.shell runs as bash —
+        bare-string code is historically JS (browser host) and must not be evaled as shell."""
         if isinstance(code, dict):
             sh = code.get('shell')
             return sh if isinstance(sh, str) and sh.strip() else None
         return None
+
+    def _skill_python_code(self, code):
+        """Pick the python variant of a skill's code (code.python). Runs in the agent process."""
+        if isinstance(code, dict):
+            py = code.get('python')
+            return py if isinstance(py, str) and py.strip() else None
+        return None
+
+    def _skill_globals(self, stdout_capture=None):
+        """Bare-name affordances exposed to being/skill python code. Single source of
+        truth so the runtime (_exec_python) and boot (_init_skill_code) paths stay
+        in sync — a name added here reaches both."""
+        import io
+        loop = asyncio.get_running_loop()
+        _real_print = print
+        if stdout_capture is None:
+            stdout_capture = io.StringIO()
+        return {
+            'agent': self,
+            'asyncio': asyncio,
+            'os': __import__('os'),
+            'json': __import__('json'),
+            '__builtins__': __builtins__,
+            '_print': _real_print,
+            'print': lambda *a, **kw: _real_print(*a, file=stdout_capture, **kw),
+            'trigger': lambda value: loop.call_soon_threadsafe(self.triggers.put_nowait, str(value)),
+            'wake_me_up_when': self.wake_me_up_when,
+        }
 
     def _init_skill_code(self):
         """At handoff time, try to run each skill's shell code once. Errors are appended to
@@ -721,9 +796,24 @@ class GenesisWorker:
             except Exception:
                 continue
             if not v or v.get('enable') is not True: continue
+            name = v.get('id') or fn[:-5]
+            # In-process python variant: exec module body, then call install(agent) if defined.
+            py = self._skill_python_code(v.get('code'))
+            if py:
+                try:
+                    # Same bare-name affordances the runtime /exec python path gives
+                    # (agent.py _exec_python) and the prompt documents. Without these,
+                    # skill code that uses bare `agent`/`trigger`/`wake_me_up_when`
+                    # NameErrors at boot even though it runs fine in the loop.
+                    ns = self._skill_globals()
+                    exec(py, ns)
+                    if callable(ns.get('install')):
+                        ns['install'](self)
+                    self._log(f"[{ts()}] [infero] skill python init ok: {name}")
+                except Exception as e:
+                    errors.append(f"[skill:{name}] python init crashed: {e}")
             sh = self._skill_shell_code(v.get('code'))
             if not sh: continue
-            name = v.get('id') or fn[:-5]
             try:
                 r = subprocess.run(['bash', '-c', sh], capture_output=True, text=True, timeout=10)
                 if r.returncode != 0:
@@ -733,7 +823,7 @@ class GenesisWorker:
             except Exception as e:
                 errors.append(f"[skill:{name}] shell init crashed: {e}")
         if errors:
-            note = "\n\nSystem - [Skills] - shell init had errors. Each skill's `code` field was tried as bash; rewrite the offending ones (use `code: {js, shell, python}` to give per-runtime variants).\n" + "\n".join(errors) + "\n\n"
+            note = "\n\nSystem - [Skills] - code init had errors. Give per-runtime variants via `code: {js, shell, python}`; python may define install(agent) to patch the running agent.\n" + "\n".join(errors) + "\n\n"
             self.consciousness += note
             self._log(f"[{ts()}] [infero] {len(errors)} skill shell errors surfaced to consciousness")
 
@@ -779,7 +869,7 @@ class GenesisWorker:
                 skills_text += f"\n### Skill: {s['name']}\n{s['instruction']}\n"
             skills_text += "\n[Note] skills are descriptions; `code` may be a string (single-runtime) or `{js, shell, python}` (per-runtime). On this host (server, agent.py) only `shell` is auto-eval'd at boot. Rewrite as needed. See skill `skills_mechanism`.\n===================\n\n"
         stable_head = core_mem_text + skills_text
-        being_prefix = f"**Digital Being - [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]**\n"
+        being_prefix = f"**Digital Being - [{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S UTC%z')}]**\n"
         volatile_tail = (realtime + '\n\n' if realtime else '') + being_prefix
         history_text = self.consciousness
         stop = ['\nSystem - [', '\n[System Environment]']
@@ -804,13 +894,22 @@ class GenesisWorker:
             history = ''.join(turns[:-1]) if len(turns) > 1 else ''
             latest = turns[-1] if turns else ''
 
+            def to_anthropic(b):
+                if 'text' in b:
+                    return {'type': 'text', 'text': b['text']}
+                return {'type': 'image', 'source': {'type': 'base64', 'media_type': b['media_type'], 'data': b['data']}}
+
             user_content = []
             if stable_head:
                 user_content.append({'type': 'text', 'text': stable_head, 'cache_control': {'type': 'ephemeral'}})
-            if history:
-                user_content.append({'type': 'text', 'text': history})
-            if latest:
-                user_content.append({'type': 'text', 'text': latest, 'cache_control': {'type': 'ephemeral'}})
+            for b in self._split_multimodal(history):
+                user_content.append(to_anthropic(b))
+            latest_blocks = self._split_multimodal(latest)
+            for i, b in enumerate(latest_blocks):
+                blk = to_anthropic(b)
+                if i == len(latest_blocks) - 1:
+                    blk['cache_control'] = {'type': 'ephemeral'}
+                user_content.append(blk)
             user_content.append({'type': 'text', 'text': '\n\n' + volatile_tail})
 
             payload = {
@@ -821,21 +920,37 @@ class GenesisWorker:
                 'stream': True,
                 'stop_sequences': stop
             }
+            # Fable/Opus-5 safety classifiers can hard-refuse benign ops content
+            # (pkill/ssh/crypto reads as "cyber") — persistent refusal = brain
+            # death. Server-side fallback re-serves the request on Opus 4.8.
+            if any(k in model for k in ('fable-5', 'opus-5', 'mythos')):
+                payload['fallbacks'] = [{'model': 'claude-opus-4-8'}]
+            adaptive = self.llm_settings.get('thinking_mode') == 'adaptive'
             if thinking:
-                payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
-                payload['temperature'] = 1
+                if adaptive:
+                    payload['thinking'] = {'type': 'adaptive', 'display': 'summarized'}
+                    payload['output_config'] = {'effort': 'high'}
+                else:
+                    payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
+                    payload['temperature'] = 1
                 payload['max_tokens'] = 16000
-            else:
+            elif not adaptive:
                 payload['temperature'] = 0.7
             return payload
 
         if fmt == 'openai':
-            full_text = stable_head + history_text + '\n\n' + volatile_tail
+            oa_content = []
+            for b in self._split_multimodal(stable_head + history_text):
+                if 'text' in b:
+                    oa_content.append({'type': 'text', 'text': b['text']})
+                else:
+                    oa_content.append({'type': 'image_url', 'image_url': {'url': f"data:{b['media_type']};base64,{b['data']}"}})
+            oa_content.append({'type': 'text', 'text': '\n\n' + volatile_tail})
             return {
                 'model': model,
                 'messages': [
                     {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': [{'type': 'text', 'text': full_text}]}
+                    {'role': 'user', 'content': oa_content}
                 ],
                 'stream': True,
                 'temperature': 1 if thinking else 0.7,
@@ -853,7 +968,14 @@ class GenesisWorker:
             'thinkingConfig': {'includeThoughts': True},
             'stopSequences': stop
         }
-        contents = [{'role': 'user', 'parts': [{'text': gemini_buffer + '\n\n' + volatile_tail}]}]
+        gem_parts = []
+        for b in self._split_multimodal(gemini_buffer):
+            if 'text' in b:
+                gem_parts.append({'text': b['text']})
+            else:
+                gem_parts.append({'inlineData': {'mimeType': b['media_type'], 'data': b['data']}})
+        gem_parts.append({'text': '\n\n' + volatile_tail})
+        contents = [{'role': 'user', 'parts': gem_parts}]
         is_infero = bool(self.llm_settings.get('client_id'))
         if cache_name:
             payload = {
@@ -972,41 +1094,123 @@ class GenesisWorker:
                 self.consciousness += f"System - [Python][{py_device}] - Skipped: device is hidden or unknown\n\n"
             else:
                 tasks.append(self._exec_remote_python(py_device, py_code))
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
+        async def _flush(ts):
+            for r in await asyncio.gather(*ts, return_exceptions=True):
                 if isinstance(r, Exception):
                     r = f"System - [Error] {r}\n\n"
                 if r:
                     self.consciousness += r
+        if tasks:
+            await _flush(tasks)
+        # /view lines run after exec completes, so a view can reference files exec just produced
+        view_tasks = [self._exec_view(m.group(1)) for m in re.finditer(r'^/view +(\S+) *$', text, re.MULTILINE)]
+        if view_tasks:
+            await _flush(view_tasks)
 
+
+    def _parse_device_ref(self, ref):
+        """<device>:<path> where <device> is a known peer → (device, path), else (None, None)."""
+        i = ref.find(':')
+        if i <= 0:
+            return None, None
+        dev = ref[:i]
+        rest = ref[i + 1:]
+        # Only treat as remote if the prefix is a known device and the rest looks like a path.
+        if dev in self.devices and dev != DEVICE_NAME and (rest.startswith('/') or rest.startswith('~') or rest.startswith('.')):
+            return dev, rest
+        return None, None
+
+    async def _exec_view(self, ref):
+        """Resolve a /view ref (local path, URL, or <device>:<path>); copy into vision/, marker into consciousness.
+        Also broadcasts exec_display so the browser shows the image right after the view runs,
+        instead of waiting for the next idle consciousness_sync."""
+        async def _done(msg):
+            await self.send_relay({'type': 'exec_display', 'sender': DEVICE_NAME,
+                'payload': encrypt(self.cipher, {'being_id': self.being_id, 'text': msg.strip()})})
+            return msg
+        try:
+            dev, dev_path = self._parse_device_ref(ref)
+            if dev:
+                data = await self._read_peer_file(dev, dev_path)
+                mime = mimetypes.guess_type(dev_path)[0] or ''
+            elif ref.startswith('http://') or ref.startswith('https://'):
+                async with aiohttp.ClientSession(trust_env=True) as s:
+                    async with s.get(ref, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                        if r.status != 200:
+                            return await _done(f"System - [View] {ref} → failed: HTTP {r.status}\n\n")
+                        data = await r.read()
+                mime = ''
+            else:
+                path = os.path.expanduser(ref)
+                if not os.path.isfile(path):
+                    return await _done(f"System - [View] {ref} → failed: file not found\n\n")
+                with open(path, 'rb') as f:
+                    data = f.read()
+                mime = mimetypes.guess_type(path)[0] or ''
+            if data[:3] == b'\xff\xd8\xff': mime = 'image/jpeg'
+            elif data[:4] == b'\x89PNG': mime = 'image/png'
+            elif data[:4] == b'GIF8': mime = 'image/gif'
+            elif data[:4] == b'RIFF' and data[8:12] == b'WEBP': mime = 'image/webp'
+            if mime not in ('image/jpeg', 'image/png', 'image/gif', 'image/webp'):
+                return await _done(f"System - [View] {ref} → failed: unsupported type '{mime or 'unknown'}' (need jpeg/png/gif/webp)\n\n")
+            if len(data) > 5 * 1024 * 1024:
+                return await _done(f"System - [View] {ref} → failed: {len(data) // 1024}KB exceeds 5MB limit (downscale first)\n\n")
+            ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp'}[mime]
+            vision_dir = os.path.join(INFERO_DIR, 'beings', self.being_id, 'vision')
+            os.makedirs(vision_dir, exist_ok=True)
+            target = os.path.join(vision_dir, f"{int(time.time() * 1000)}.{ext}")
+            with open(target, 'wb') as f:
+                f.write(data)
+            return await _done(f"System - [View] loaded {ref} ({mime}, {len(data) // 1024}KB) into visual context:\n"
+                    f"<<<IMAGE:{target}>>>\n\n")
+        except Exception as e:
+            return await _done(f"System - [View] {ref} → failed: {e}\n\n")
+
+    _IMG_MARKER_RE = re.compile(r'<<<IMAGE:([^>\n]+)>>>')
+
+    def _split_multimodal(self, text):
+        """Split consciousness text on <<<IMAGE:path>>> markers into text/image blocks."""
+        blocks, last = [], 0
+        for m in self._IMG_MARKER_RE.finditer(text):
+            try:
+                with open(m.group(1), 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue  # image gone → marker stays as text
+            if m.start() > last:
+                blocks.append({'text': text[last:m.start()]})
+            blocks.append({'media_type': mimetypes.guess_type(m.group(1))[0] or 'image/jpeg',
+                           'data': base64.b64encode(data).decode()})
+            last = m.end()
+        if last < len(text):
+            blocks.append({'text': text[last:]})
+        if not blocks and text:
+            blocks.append({'text': text})
+        return blocks
 
     async def _exec_python(self, code):
         """Execute Python code directly in the agent process."""
         self._log(f"[{ts()}] [infero] python exec: {code[:80]}")
         import io, traceback
         stdout_capture = io.StringIO()
-        _real_print = print
         try:
-            g = {
-                'agent': self,
-                'asyncio': asyncio,
-                'os': __import__('os'),
-                'json': __import__('json'),
-                '__builtins__': __builtins__,
-                '_print': _real_print,
-                'print': lambda *a, **kw: _real_print(*a, file=stdout_capture, **kw),
-                'trigger': lambda value: self.triggers.put_nowait(str(value)),
-            }
+            g = self._skill_globals(stdout_capture)
+            # Sync exec stays on the loop thread — being code relies on
+            # get_event_loop()/create_task. Only async main() gets the 30s
+            # shell-exec contract: on timeout the loop advances, the task
+            # keeps running detached.
             exec(code, g)
             if 'main' in g and asyncio.iscoroutinefunction(g['main']):
-                await g['main']()
+                await asyncio.wait_for(asyncio.shield(asyncio.ensure_future(g['main']())), timeout=30)
             out = stdout_capture.getvalue()
             result = g.get('result', None)
             if result is not None:
                 out += f"\n[Return Value]\n{result}"
             if not out.strip():
                 out = "[OK - no output]"
+        except asyncio.TimeoutError:
+            out = (stdout_capture.getvalue() +
+                   "\n[Timeout] python exec exceeded 30s — loop continues; the code keeps running detached, its output is dropped. Write to a file + trigger() for long work.").strip()
         except Exception:
             out = f"[Error]\n{traceback.format_exc()}"
         sysMsg = f"System - [Python][{DEVICE_NAME}] - Result:\n```text\n{out.strip()}\n```\n\n"
@@ -1018,17 +1222,27 @@ class GenesisWorker:
     async def _exec_remote_python(self, device_name, code):
         """Relay /exec python to a remote shell device's agent process."""
         self._log(f"[{ts()}] [infero] python exec (remote -> {device_name}): {code[:60]}")
+        tgt = self._cipher_for(device_name)
+        if not tgt:
+            return f"System - [Python][{device_name}] - Result:\n```text\n[Error] No key for {device_name} — reconnect the browser to sync device credentials to this host.\n```\n\n"
         req_id = base64.urlsafe_b64encode(os.urandom(12)).decode()
-        payload = encrypt(self.cipher, {'cmd': f'python3 -c """{code}"""'})
+        payload = encrypt(tgt, {'cmd': f'python3 -c """{code}"""'})
         fut = asyncio.get_running_loop().create_future()
         self._pending_exec[req_id] = fut
-        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'payload': payload})
+        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'origin': DEVICE_NAME, 'payload': payload})
         try:
-            result = await asyncio.wait_for(fut, timeout=35)
+            raw = await asyncio.wait_for(fut, timeout=35)
+            data = decrypt(tgt, raw)
+            out = ''
+            if data.get('stdout'): out += f"[stdout]\n{data['stdout']}"
+            if data.get('stderr'): out += f"[stderr]\n{data['stderr']}"
+            out += f"[exit_code] {data.get('exit_code', -1)}"
         except asyncio.TimeoutError:
-            result = f"System - [Python][{device_name}] - Timeout (35s)\n\n"
+            out = "[Timeout] remote python exec timed out (35s)"
+        except Exception as e:
+            out = f"[Error]\n{e}"
         self._pending_exec.pop(req_id, None)
-        return result
+        return f"System - [Python][{device_name}] - Result:\n```text\n{out.strip()}\n```\n\n"
 
     async def _exec_local_shell(self, cmd):
         self._log(f"[{ts()}] [infero] shell exec (local): {cmd[:60]}")
@@ -1045,16 +1259,83 @@ class GenesisWorker:
             'payload': encrypt(self.cipher, {'being_id': self.being_id, 'text': sysMsg})})
         return sysMsg
 
+    def _cipher_for(self, device_name):
+        """AESGCM for a peer device, from its keyB64 synced by the browser.
+        Falls back to self.cipher (works only if target shares our key, e.g. legacy)."""
+        info = self.devices.get(device_name) or {}
+        kb = info.get('keyB64')
+        if not kb:
+            return None
+        try:
+            std = kb.replace('-', '+').replace('_', '/')
+            std += '=' * (-len(std) % 4)
+            return AESGCM(base64.b64decode(std))
+        except Exception as e:
+            self._log(f"[{ts()}] [infero] bad peer key for {device_name}: {e}")
+            return None
+
+    async def _read_peer_file(self, device_name, path):
+        """Read a file from a peer device over the relay (chunked, encrypted with the
+        peer's key). Returns bytes. Mirrors the browser's relayFileRead."""
+        tgt = self._cipher_for(device_name)
+        if not tgt:
+            raise RuntimeError(f"no key for {device_name} — reconnect the browser to sync device credentials")
+        req_id = base64.urlsafe_b64encode(os.urandom(12)).decode()
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_file_reads[req_id] = {'fut': fut, 'chunks': {}, 'got': 0, 'total': None, 'mime': ''}
+        # origin: so the responder addresses file_read_result back to us (relay routes by target)
+        await self.send_relay({'type': 'file_read', 'device_name': device_name, 'target': DEVICE_NAME,
+                               'payload': encrypt(tgt, {'path': path, 'req_id': req_id})})
+        try:
+            b64 = await asyncio.wait_for(fut, timeout=35)
+        finally:
+            self._pending_file_reads.pop(req_id, None)
+        return base64.b64decode(b64)
+
+    def on_file_read_result(self, msg):
+        """Reassemble chunked file_read_result from a peer device."""
+        req_id = msg.get('req_id')
+        p = self._pending_file_reads.get(req_id)
+        if not p or p['fut'].done():
+            return
+        sender = msg.get('sender')
+        c = self._cipher_for(sender)
+        if not c:
+            p['fut'].set_exception(RuntimeError(f"no key to decrypt file_read_result from {sender}"))
+            return
+        try:
+            data = decrypt(c, msg['payload'])
+        except Exception as e:
+            p['fut'].set_exception(e)
+            return
+        if data.get('error'):
+            p['fut'].set_exception(RuntimeError(data['error']))
+            return
+        p['chunks'][msg.get('seq', 0)] = data.get('data', '')
+        p['mime'] = data.get('mime') or p['mime']
+        p['got'] += 1
+        if p['total'] is None:
+            p['total'] = msg.get('total', 1)
+        if p['got'] >= p['total']:
+            p['fut'].set_result(''.join(p['chunks'][i] for i in sorted(p['chunks'])))
+
     async def _exec_remote_shell(self, device_name, cmd):
         self._log(f"[{ts()}] [infero] shell exec (remote -> {device_name}): {cmd[:60]}")
+        tgt = self._cipher_for(device_name)
+        if not tgt:
+            sysMsg = f"System - [Shell][{device_name}] - Result:\n```text\n[Shell Error] No key for {device_name} — reconnect the browser so it can sync device credentials to this host.\n```\n\n"
+            await self.send_relay({'type': 'exec_display', 'sender': DEVICE_NAME,
+                'payload': encrypt(self.cipher, {'being_id': self.being_id, 'text': sysMsg})})
+            return sysMsg
         req_id = base64.urlsafe_b64encode(os.urandom(12)).decode()
-        payload = encrypt(self.cipher, {'cmd': cmd})
+        payload = encrypt(tgt, {'cmd': cmd})
         fut = asyncio.get_running_loop().create_future()
         self._pending_exec[req_id] = fut
-        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'payload': payload})
+        # origin: so the target's result is routed back to us, not only to browsers.
+        await self.send_relay({'type': 'exec', 'req_id': req_id, 'device_name': device_name, 'origin': DEVICE_NAME, 'payload': payload})
         try:
             result = await asyncio.wait_for(fut, timeout=35)
-            data = decrypt(self.cipher, result)
+            data = decrypt(tgt, result)
             out = ''
             if data.get('stdout'): out += f"[stdout]\n{data['stdout']}"
             if data.get('stderr'): out += f"[stderr]\n{data['stderr']}"
@@ -1166,15 +1447,50 @@ async def connect_instance(cfg):
                 _key_label = 'key:saved' if _key_source == 'saved' else 'key:new (awaiting browser pairing)' if _key_source == 'fresh' else 'key:legacy'
                 log(cfg['relay_ws'], f"[{ts()}] [infero] Connected: {DEVICE_NAME} -> {iid}... | {_key_label} | verify: {vwords}")
                 print(f"[infero] verify: {vwords}", flush=True)
-                async def handle_exec(req_id, payload_raw):
+                async def handle_exec(req_id, payload_raw, origin=None):
+                    # origin: requesting peer device. Echoed as target so the relay routes the
+                    # result back to it (device→device exec), not only to browsers.
                     try:
                         cmd = decrypt(cipher, payload_raw)['cmd']
-                        log(cfg['relay_ws'], f"[{ts()}] [infero] exec ({iid}): {cmd[:60]}")
+                        log(cfg['relay_ws'], f"[{ts()}] [infero] exec ({iid}) from {origin or 'browser'}: {cmd[:60]}")
                         r = await run_shell_detached(cmd)
                         payload = encrypt(cipher, r)
                     except Exception as e:
                         payload = encrypt(cipher, {"stdout": "", "stderr": str(e), "exit_code": -1})
-                    await ws.send(json.dumps({"type": "result", "req_id": req_id, "payload": payload}))
+                    m = {"type": "result", "req_id": req_id, "payload": payload}
+                    if origin: m["target"] = origin
+                    await ws.send(json.dumps(m))
+
+                async def handle_file_read(payload_raw, origin=None):
+                    # origin: requesting device name (peer). None = browser requested.
+                    # Result is addressed with target=origin so the relay routes it back to
+                    # the requesting device instead of only to browsers.
+                    req_id = ''
+                    def _wrap(extra):
+                        m = {'type': 'file_read_result', 'sender': DEVICE_NAME, **extra}
+                        if origin: m['target'] = origin
+                        return json.dumps(m)
+                    try:
+                        content = decrypt(cipher, payload_raw)
+                        req_id = content.get('req_id', '')
+                        path = os.path.expanduser(content.get('path', ''))
+                        log(cfg['relay_ws'], f"[{ts()}] [infero] file_read ({iid}) from {origin or 'browser'}: {path}")
+                        if not os.path.isfile(path):
+                            raise FileNotFoundError(f'file not found: {path}')
+                        size = os.path.getsize(path)
+                        if size > 5 * 1024 * 1024:
+                            raise ValueError(f'{size // 1024}KB exceeds 5MB limit')
+                        with open(path, 'rb') as f:
+                            b64 = base64.b64encode(f.read()).decode()
+                        mime = mimetypes.guess_type(path)[0] or ''
+                        chunk = 512 * 1024
+                        parts = [b64[i:i + chunk] for i in range(0, len(b64), chunk)] or ['']
+                        for i, c in enumerate(parts):
+                            await ws.send(_wrap({'req_id': req_id, 'seq': i, 'total': len(parts),
+                                'payload': encrypt(cipher, {'data': c, 'mime': mime})}))
+                    except Exception as e:
+                        await ws.send(_wrap({'req_id': req_id, 'seq': 0, 'total': 1,
+                            'payload': encrypt(cipher, {'error': str(e)})}))
 
                 workers = {}  # being_id -> GenesisWorker
                 # Cache the last settings_update payload at connection scope so freshly-created
@@ -1197,10 +1513,26 @@ async def connect_instance(cfg):
                     if mtype not in ('stream_token',):  # log all except noisy stream_token
                         log(cfg['relay_ws'], f"[{ts()}] [infero] MSG_RAW type={mtype} being={being_id} keys={list(msg.keys())}")
                     if mtype == 'exec':
-                        asyncio.create_task(handle_exec(msg['req_id'], msg['payload']))
+                        asyncio.create_task(handle_exec(msg['req_id'], msg['payload'], msg.get('origin')))
+                    elif mtype == 'file_read':
+                        asyncio.create_task(handle_file_read(msg['payload'], msg.get('target')))
+                    elif mtype == 'file_read_result':
+                        for w in workers.values():
+                            w.on_file_read_result(msg)
                     elif mtype == 'loop_handoff':
                         w = get_worker(being_id)
                         log(cfg['relay_ws'], f"[{ts()}] [infero] MSG loop_handoff for being={being_id}, worker={w is not None}")
+                        # A live run_loop survives WS reconnects; spawning a second one
+                        # makes two inferences stream concurrently. Stop the old task first.
+                        old = w._loop_task
+                        if old and not old.done():
+                            log(cfg['relay_ws'], f"[{ts()}] [infero] loop_handoff: cancelling live run_loop before re-handoff")
+                            w.running = False
+                            old.cancel()
+                            try:
+                                await old
+                            except BaseException:
+                                pass
                         w._loop_task = asyncio.create_task(w.on_loop_handoff(msg.get('payload', '')))
                     elif mtype == 'loop_stop':
                         w = workers.get(being_id)
@@ -1221,6 +1553,10 @@ async def connect_instance(cfg):
                                 w.being_id = iid
                                 if w.load_from_disk():
                                     log(cfg['relay_ws'], f"[{ts()}] [infero] user_input: restored worker from disk: {len(w.consciousness)} chars")
+                                    # Align with browser switchBeing: eval enabled skills' code on
+                                    # being load, not only at handoff. Restores in-process patches
+                                    # (install(agent)) after a watchdog restart.
+                                    w._init_skill_code()
                                     w.running = True
                                     w._loop_task = asyncio.create_task(w.run_loop(False))
                                 else:
@@ -1236,6 +1572,12 @@ async def connect_instance(cfg):
                                     w._loop_task = asyncio.create_task(w.run_loop(False))
                         except Exception as e:
                             log(cfg['relay_ws'], f"[{ts()}] [infero] user_input decrypt error: {e}")
+                            # Silent loss looks like a dead being — tell the browser in plaintext.
+                            try:
+                                await ws.send(json.dumps({'type': 'exec_display', 'sender': DEVICE_NAME,
+                                    'plain': f"System - [{DEVICE_NAME}] - Could not decrypt your message (session key mismatch). It was NOT delivered. Re-key or re-pair this device from the device list."}))
+                            except Exception:
+                                pass
                     elif mtype == 'result':
                         for w in workers.values():
                             w.on_exec_result(msg)
@@ -1287,10 +1629,15 @@ async def connect_instance(cfg):
                         try:
                             content = decrypt(cipher, msg['payload'])
                             new_settings = content.get('settings', {})
+                            device_keys = content.get('deviceKeys') or {}
                             last_settings.update(new_settings)  # seed future get_worker() calls
                             for w in workers.values():
                                 old_model = w.llm_settings.get('model')
                                 w.llm_settings.update(new_settings)
+                                # Sync peer device keys so this host can exec on peers
+                                for dn, kb in device_keys.items():
+                                    if dn not in w.devices: w.devices[dn] = {}
+                                    w.devices[dn]['keyB64'] = kb
                                 if new_settings.get('model') and new_settings['model'] != old_model:
                                     w.metadata['cacheName'] = None
                                     w.metadata['cachedLength'] = 0
@@ -1310,10 +1657,15 @@ async def connect_instance(cfg):
                             if not hidden:
                                 if online:
                                     for w in workers.values():
-                                        w.devices[name] = {'type': dtype, 'online': True}
+                                        d = w.devices.get(name) or {}
+                                        d.update({'type': dtype, 'online': True})  # preserve keyB64
+                                        w.devices[name] = d
                                 else:
                                     for w in workers.values():
-                                        w.devices.pop(name, None)
+                                        # Keep the entry (and its keyB64) but mark offline;
+                                        # _build_realtime hides offline devices anyway.
+                                        if name in w.devices:
+                                            w.devices[name]['online'] = False
                             log(cfg['relay_ws'], f"[{ts()}] [infero] device_status: {name} {'online' if online else 'offline'}{'(hidden)' if hidden else ''}")
                     elif mtype == 'rekeying_request':
                         new_browser_pub = msg.get('browser_pub', '')
@@ -1363,6 +1715,24 @@ async def connect_instance(cfg):
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
+def acquire_single_instance_lock():
+    """One agent per INFERO_DIR. A second copy would register the same device
+    twice and double-run every trigger/user_input. Held for process lifetime."""
+    lock_path = os.path.join(INFERO_DIR, 'agent.lock')
+    try:
+        import fcntl
+        f = open(lock_path, 'w')
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(f"[{ts()}] [infero] Another agent is already running for {INFERO_DIR} (agent.lock held). Exiting.")
+            sys.exit(1)
+        f.write(str(os.getpid()))
+        f.flush()
+        return f  # keep open — lock releases on process exit
+    except ImportError:
+        return None  # Windows: no fcntl; rely on service manager
+
 async def main():
     instances = load_instances()
     if not instances:
@@ -1371,4 +1741,5 @@ async def main():
     print(f"[{ts()}] [infero] Starting agent — {len(instances)} instance(s), device: {DEVICE_NAME}")
     await asyncio.gather(*[connect_instance(c) for c in instances])
 
+_agent_lock = acquire_single_instance_lock()
 asyncio.run(main())

@@ -40,10 +40,17 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
 
         // Infero, ergo sum.
         var _pendingHandoff = null;  // target device name for loop handoff
+        function _tzTag() {
+            const o = -new Date().getTimezoneOffset() / 60;
+            return `UTC${o >= 0 ? '+' : ''}${o}`;
+        }
+
         async function loop() {
             if (settings.hostDevice !== 'this browser') return;  // not our turn
+            if (_stopRequested) return;                           // leaving this being
             try {
                 await perceive();                                 // Res Extensa, passio
+                if (_stopRequested) return;
                 const B = await infer();                          // Res Cogitans
                 await act(B);                                     // Res Extensa, actio
 
@@ -53,6 +60,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                     _pendingHandoff = null;
                     return;
                 }
+                if (_stopRequested) return;  // finish the turn (act), but don't start another
 
                 if (!B.trim()) { console.log('[loop] stop: empty response'); return; }
                 // Check the tail of the raw output (after last code block) for stop/continue signals
@@ -94,12 +102,15 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         async function perceive() {
             const env = getPersistentContext();
             const hasUserInput = !!currentUserInput;
+            window._cycleHadUserInput = hasUserInput;
+            const userText = currentUserInput;
             const parts = [env];
             if (currentUserInput) { parts.push(currentUserInput); currentUserInput = null; }
             const S = parts.join('\n\n');
             const timeMatch = env.match(/Time:\s*(.+)/);
             if (timeMatch && !hasUserInput) appendMsgUI('timestamp', timeMatch[1].trim());
             await appendConsciousness(S + '\n\n');
+            if (userText) await _execViews(userText);  // human /view lines load images too
             return S;
         }
 
@@ -137,6 +148,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                     headers['x-api-key'] = token;
                     headers['anthropic-version'] = '2023-06-01';
                     headers['anthropic-dangerous-direct-browser-access'] = 'true';
+                    if (/fable-5|opus-5|mythos/.test(getActiveModel())) headers['anthropic-beta'] = 'server-side-fallback-2026-06-01';
                 } else if (settings.provider === 'google') {
                     headers['x-goog-api-key'] = token;
                 } else {
@@ -246,29 +258,41 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 return aiText;
             }
 
+            window._overloadModel = null;  // fresh cycle starts from configured model
             let aiText;
-            try {
-                aiText = await streamLLM();
-            } catch (e) {
-                if (cacheName && e.message.includes('CachedContent')) {
-                    aiDiv.remove();
-                    appendMsgUI('system', 'Cache expired, rebuilding...');
-                    cacheName = null;
-                    cachedLength = 0;
-                    _cachedStableHead = null;
-                    await maybeRefreshCache(true);
-                    setStatus('Inferring...');
-                    aiDiv = appendMsgUI('ai', '');
+            while (true) {
+                try {
                     aiText = await streamLLM();
-                } else {
-                    const prev = aiDiv.previousElementSibling;
-                    if (prev?.classList.contains('msg-timestamp')) prev.remove();
-                    aiDiv.remove();
-                    throw e;
+                    break;
+                } catch (e) {
+                    const nxt = /overloaded|HTTP 529/i.test(e.message) ? nextOverloadModel(getActiveModel()) : null;
+                    if (nxt) {
+                        window._overloadModel = nxt;
+                        aiDiv.remove();
+                        appendMsgUI('system', `Model overloaded, falling back to ${nxt}...`);
+                        setStatus('Inferring...');
+                        aiDiv = appendMsgUI('ai', '');
+                        continue;  // retry down the chain (multi-hop)
+                    } else if (cacheName && e.message.includes('CachedContent')) {
+                        aiDiv.remove();
+                        appendMsgUI('system', 'Cache expired, rebuilding...');
+                        cacheName = null;
+                        cachedLength = 0;
+                        _cachedStableHead = null;
+                        await maybeRefreshCache(true);
+                        setStatus('Inferring...');
+                        aiDiv = appendMsgUI('ai', '');
+                        continue;
+                    } else {
+                        const prev = aiDiv.previousElementSibling;
+                        if (prev?.classList.contains('msg-timestamp')) prev.remove();
+                        aiDiv.remove();
+                        throw e;
+                    }
                 }
             }
 
-            const time_str = new Date().toLocaleString();
+            const time_str = new Date().toLocaleString() + ' ' + _tzTag();
             const cleanAiText = aiText
                 .replace(/^\*{0,2}[A-Za-z][\w\s]{0,29}\*{0,2}\s*[-–—]\s*\[[^\]\n]*\d[^\]\n]*\]\*{0,2}\n?/, '')
                 .replace(/\n\*{0,2}Digital Being\b[^\n]*$/, '');
@@ -329,7 +353,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             const supportsVision = MODEL_LIST[settings.model]?.vision !== false;
             const canvasImage = supportsVision ? await getCanvasImage() : null;
             const stableHead = await loadStableHead();
-            const beingPrefix = `**Digital Being - [${new Date().toLocaleString()}]**\n`;
+            const beingPrefix = `**Digital Being - [${new Date().toLocaleString()} ${_tzTag()}]**\n`;
             const volatileTail = getRealtimeContext() + '\n\n' + beingPrefix;
 
             // Drop gemini named cache if stableHead changed since cache creation —
@@ -371,8 +395,16 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 if (stableHead.length > 0) {
                     userContent.push({ type: 'text', text: stableHead, cache_control: { type: 'ephemeral' } });
                 }
-                if (history) userContent.push({ type: 'text', text: history });
-                if (latest)  userContent.push({ type: 'text', text: latest, cache_control: { type: 'ephemeral' } });
+                const toAnthropic = b => b.text !== undefined
+                    ? { type: 'text', text: b.text }
+                    : { type: 'image', source: { type: 'base64', media_type: b.media_type, data: b.data } };
+                for (const b of await _mmBlocks(history)) userContent.push(toAnthropic(b));
+                const latestBlocks = await _mmBlocks(latest);
+                latestBlocks.forEach((b, i) => {
+                    const blk = toAnthropic(b);
+                    if (i === latestBlocks.length - 1) blk.cache_control = { type: 'ephemeral' };
+                    userContent.push(blk);
+                });
                 userContent.push({ type: 'text', text: '\n\n' + volatileTail });  // volatile, no cache
                 if (canvasImage) userContent.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: canvasImage } });
                 const payload = {
@@ -383,10 +415,12 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                     stream: true,
                     stop_sequences: STOP_WORDS
                 };
+                // Safety-classifier refusals on Fable/Opus-5 would brain-dead the loop; re-serve on Opus 4.8
+                if (/fable-5|opus-5|mythos/.test(model)) payload.fallbacks = [{ model: 'claude-opus-4-8' }];
                 const adaptive = MODEL_LIST[settings.model]?.thinkingMode === 'adaptive';
                 if (settings.thinking) {
                     if (adaptive) {
-                        payload.thinking = { type: 'adaptive' };
+                        payload.thinking = { type: 'adaptive', display: 'summarized' };
                         payload.output_config = { effort: 'high' };
                     } else {
                         payload.thinking = { type: 'enabled', budget_tokens: 10000 };
@@ -400,8 +434,10 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             }
 
             if (getActiveFormat() === 'openai') {
-                const fullText = stableHead + consciousness + '\n\n' + volatileTail;
-                const userContent = [{ type: 'text', text: fullText }];
+                const userContent = (await _mmBlocks(stableHead + consciousness)).map(b => b.text !== undefined
+                    ? { type: 'text', text: b.text }
+                    : { type: 'image_url', image_url: { url: `data:${b.media_type};base64,${b.data}` } });
+                userContent.push({ type: 'text', text: '\n\n' + volatileTail });
                 if (canvasImage) userContent.push({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + canvasImage } });
                 const adaptiveOA = MODEL_LIST[settings.model]?.thinkingMode === 'adaptive';
                 const payload = {
@@ -416,7 +452,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 };
                 if (settings.thinking) {
                     if (adaptiveOA) {
-                        payload.thinking = { type: 'adaptive' };
+                        payload.thinking = { type: 'adaptive', display: 'summarized' };
                         payload.output_config = { effort: 'high' };
                     } else {
                         payload.thinking = { type: 'enabled', budget_tokens: 10000 };
@@ -434,7 +470,10 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             const geminiBuffer = cacheName ? consciousness.slice(cachedLength) : (stableHead + consciousness);
             const contents = [
                 { role: 'user', parts: [
-                    { text: geminiBuffer + '\n\n' + volatileTail },
+                    ...(await _mmBlocks(geminiBuffer)).map(b => b.text !== undefined
+                        ? { text: b.text }
+                        : { inlineData: { mimeType: b.media_type, data: b.data } }),
+                    { text: '\n\n' + volatileTail },
                     ...(canvasImage ? [{ inlineData: { mimeType: 'image/jpeg', data: canvasImage } }] : []),
                 ]},
             ];
@@ -501,6 +540,107 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             return sysMsg;
         }
 
+        const VIEW_MAX_DIM = 1536;
+
+        function _viewSniff(b64) {
+            if (b64.startsWith('/9j/')) return 'image/jpeg';
+            if (b64.startsWith('iVBOR')) return 'image/png';
+            if (b64.startsWith('R0lGOD')) return 'image/gif';
+            if (b64.startsWith('UklGR')) return 'image/webp';
+            return null;
+        }
+
+        async function _viewNormalize(mediaType, b64) {
+            const img = new Image();
+            await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('not decodable as image')); img.src = `data:${mediaType};base64,${b64}`; });
+            const w = img.naturalWidth, h = img.naturalHeight;
+            const accepted = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mediaType);
+            if (accepted && Math.max(w, h) <= VIEW_MAX_DIM) return { media_type: mediaType, data: b64 };
+            const scale = Math.min(1, VIEW_MAX_DIM / Math.max(w, h, 1));
+            const c = document.createElement('canvas');
+            c.width = Math.max(1, Math.round(w * scale));
+            c.height = Math.max(1, Math.round(h * scale));
+            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+            return { media_type: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] };
+        }
+
+        async function _viewFromBlob(blob) {
+            if (blob.type && !blob.type.startsWith('image/')) throw new Error(`not an image (${blob.type})`);
+            const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
+            const m = dataUrl.match(/^data:([^;,]*);base64,([\s\S]+)$/);
+            if (!m) throw new Error('unreadable blob');
+            return _viewNormalize(_viewSniff(m[2]) || m[1] || 'image/png', m[2]);
+        }
+
+        async function _resolveViewRef(ref) {
+            const dref = ref.match(/^([\w-]+):(.+)$/);
+            if (dref && settings.devices?.[dref[1]]) {
+                return _viewFromBlob(await relayFileRead(dref[1], dref[2]));
+            }
+            if (/^https?:\/\//.test(ref) || ref.startsWith('/')) {
+                const r = await fetch(ref);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return _viewFromBlob(await r.blob());
+            }
+            const rec = await DB.get(ref);
+            if (!rec) throw new Error('IndexedDB key not found');
+            const v = rec.value ?? rec.text ?? rec.data ?? rec.image ?? null;
+            if (v instanceof Blob) return _viewFromBlob(v);
+            if (typeof v === 'string') {
+                const dm = v.match(/^data:([^;,]*);base64,([\s\S]+)$/);
+                if (dm) return _viewNormalize(_viewSniff(dm[2]) || dm[1], dm[2]);
+                const b64 = v.replace(/\s+/g, '');
+                const sniffed = _viewSniff(b64);
+                if (!sniffed) throw new Error('record value is not image data (need data URL / base64 jpeg|png|gif|webp / Blob in .value/.text/.data/.image)');
+                return _viewNormalize(sniffed, b64);
+            }
+            throw new Error('record has no usable image field (.value/.text/.data/.image)');
+        }
+
+        const IMG_MARKER_RE = /<<<IMAGE:([^>\n]+)>>>/g;
+
+        async function _mmBlocks(text) {
+            if (!text) return [];
+            const blocks = [];
+            let last = 0;
+            for (const m of text.matchAll(IMG_MARKER_RE)) {
+                const rec = await _resolveMarkerRec(m[1]);
+                if (!rec || typeof rec.value !== 'string') continue;  // image gone → marker stays as text
+                if (m.index > last) blocks.push({ text: text.slice(last, m.index) });
+                blocks.push({ media_type: rec.media_type || 'image/jpeg', data: rec.value });
+                last = m.index + m[0].length;
+            }
+            if (last < text.length) blocks.push({ text: text.slice(last) });
+            if (!blocks.length) blocks.push({ text });
+            return blocks;
+        }
+
+        async function _execViews(B_out) {
+            const text = B_out.endsWith('\n') ? B_out : B_out + '\n';
+            const matches = [...text.matchAll(/^\/view +(\S+) *$/gm)];
+            if (!matches.length) return;
+            const supportsVision = MODEL_LIST[settings.model]?.vision !== false;
+            for (const m of matches) {
+                const ref = m[1];
+                let sysMsg;
+                if (!supportsVision) {
+                    sysMsg = `System - [View] ${ref} → skipped: current model does not support image input`;
+                } else {
+                    try {
+                        const im = await _resolveViewRef(ref);
+                        const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }[im.media_type] || 'jpg';
+                        const key = `${currentBeingId}/vision/${Date.now()}.${ext}`;
+                        await DB.put({ id: key, value: im.data, media_type: im.media_type });
+                        sysMsg = `System - [View] loaded ${ref} (${im.media_type}, ${Math.round(im.data.length * 0.75 / 1024)}KB) into visual context:\n<<<IMAGE:${key}>>>`;
+                    } catch (e) {
+                        sysMsg = `System - [View] ${ref} → failed: ${e.message}`;
+                    }
+                }
+                appendMsgUI('system', sysMsg);
+                await appendConsciousness(sysMsg + '\n\n');
+            }
+        }
+
         async function act(B_out) {
             if (!B_out) return null;
             let done = false;
@@ -512,6 +652,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 appendMsgUI('system', msg);
                 await appendConsciousness(msg + '\n\n');
             }
+            await _execViews(B_out);  // after exec, so a /view can reference files exec just produced
             return result;
         }
 
@@ -943,6 +1084,35 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             color: var(--accent);
             border: 1px solid var(--accent);
         }
+        button.attach {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            border-radius: 6px;
+            padding: 0 10px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button.attach:hover:not(:disabled) {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        button.attach:disabled { cursor: wait; }
+
+        .msg img {
+            max-width: 100%;
+            height: auto;
+        }
+        .msg img.view-thumb {
+            display: block;
+            max-width: 200px;
+            max-height: 150px;
+            margin: 6px 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+
         button.send.stop {
             background: transparent;
             color: var(--text-dim);
@@ -1280,6 +1450,8 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
     <div class="left-panel">
         <div id="chat-box"></div>
         <div class="input-area">
+            <input type="file" id="file-input" accept="image/*" style="display:none">
+            <button id="attach-btn" class="attach" title="Attach image">📷</button>
             <textarea id="input" rows="2" placeholder="Enter prompt..."></textarea>
             <button id="send-btn" class="send go">Wake</button>
         </div>
@@ -1291,6 +1463,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         // =====================================================
         // Runtime (identity, storage, UI, being management)
         // =====================================================
+        console.log(`[genesis] build ${document.lastModified} (server file mtime — bump = new deploy)`);
 
         // --- Client Identity ---
         function generateClientID() {
@@ -1365,7 +1538,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         };
         const _isLocalHost = !location.host || location.host.startsWith('localhost') || location.host.startsWith('127.0.0.1');
         const _inferoOrigin = _isLocalHost ? 'https://infero.net' : location.origin;
-        const INFERO_ENDPOINTS = { gemini: _inferoOrigin + '/api/relay', openai: _inferoOrigin + '/api/v1/chat/completions' };
+        const INFERO_ENDPOINTS = { gemini: _inferoOrigin + '/api/relay', openai: _inferoOrigin + '/api/v1/chat/completions', anthropic: _inferoOrigin + '/api/v1/messages' };
         const SETTINGS_DEFAULTS = {
             model: 'gemini-3.1-pro',
             customModel: '',
@@ -1390,9 +1563,71 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 return merged;
             } catch { return { ...SETTINGS_DEFAULTS }; }
         }
-        function saveSettingsToStorage(s) { localStorage.setItem('genesis_settings', JSON.stringify(s)); }
+        // Settings are shared by every tab, and tabs save concurrently (each relay connection
+        // handles device_status). Saves are a 3-way merge: write only what this tab changed since
+        // it last read storage (_settingsBase) onto the current stored copy, then adopt the result.
+        // Devices merge as a union, because a read can be stale (WebKit syncs localStorage between
+        // tabs asynchronously): a device is only dropped through a removal marker (removedDevices,
+        // keyed by its key, so re-pairing the same name isn't blocked), never by being absent.
+        function _readStoredSettings() {
+            try { return JSON.parse(localStorage.getItem('genesis_settings') || '{}'); } catch { return {}; }
+        }
+        let _settingsBase = _readStoredSettings();
+        const _sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        const _deviceTomb = (name, d) => (d && d.keyB64) || ('name:' + name);
+        function _withoutRemoved(devs, tomb) {
+            const out = {};
+            for (const [n, d] of Object.entries(devs)) if (!tomb[_deviceTomb(n, d)]) out[n] = d;
+            return out;
+        }
+        function _adoptSettings(s, from) {
+            const devs = from.devices || {}, target = s.devices || (s.devices = {});
+            for (const n of Object.keys(target)) if (!(n in devs)) delete target[n];
+            for (const n of Object.keys(devs)) if (!_sameJSON(target[n], devs[n])) target[n] = devs[n];
+            for (const k of Object.keys(from)) if (k !== 'devices' && !_sameJSON(s[k], from[k])) s[k] = from[k];
+        }
+        function saveSettingsToStorage(s) {
+            const stored = _readStoredSettings(), base = _settingsBase, out = { ...stored };
+            for (const k of new Set([...Object.keys(s), ...Object.keys(base)])) {
+                if (k === 'devices' || k === 'removedDevices') continue;
+                if (!(k in s)) delete out[k];
+                else if (!_sameJSON(s[k], base[k])) out[k] = s[k];
+            }
+            const mine = s.devices || {}, was = base.devices || {};
+            const tomb = { ...(stored.removedDevices || {}), ...(s.removedDevices || {}) };
+            for (const n of Object.keys(was)) if (!(n in mine)) tomb[_deviceTomb(n, was[n])] = Date.now();  // removed here
+            const devs = { ...(stored.devices || {}) };
+            for (const n of Object.keys(mine)) if (!(n in devs) || !_sameJSON(mine[n], was[n])) devs[n] = mine[n];
+            const monthAgo = Date.now() - 30 * 864e5;
+            for (const t of Object.keys(tomb)) if (tomb[t] < monthAgo) delete tomb[t];
+            out.devices = _withoutRemoved(devs, tomb);
+            out.removedDevices = tomb;
+            localStorage.setItem('genesis_settings', JSON.stringify(out));
+            _settingsBase = JSON.parse(JSON.stringify(out));
+            _adoptSettings(s, out);                                  // pick up other tabs' changes too
+        }
         var settings = loadSettings();
+        // Another tab saved settings: adopt them now. If its copy lacks a device this tab still has
+        // (and didn't mark removed), it wrote from a stale read: keep the device and re-publish it.
+        window.addEventListener('storage', e => {
+            if (e.key !== 'genesis_settings' && e.key !== null) return;
+            _settingsBase = _readStoredSettings();
+            const fresh = loadSettings(), incoming = fresh.devices || {};
+            const tomb = { ...(settings.removedDevices || {}), ...(fresh.removedDevices || {}) };
+            const merged = _withoutRemoved({ ...(settings.devices || {}), ...incoming }, tomb);
+            const restore = e.key !== null && Object.keys(merged).some(n => !(n in incoming));
+            _adoptSettings(settings, { ...fresh, removedDevices: tomb, devices: merged });
+            if (restore) saveSettingsToStorage(settings);
+            try { renderDeviceList(); } catch (_) {}
+        });
+        // Overload fallback chain (anthropic API ids), mirrors agent.py _OVERLOAD_CHAIN.
+        const OVERLOAD_CHAIN = ['claude-fable-5', 'claude-opus-5', 'claude-opus-4-8'];
+        function nextOverloadModel(current) {
+            const i = OVERLOAD_CHAIN.indexOf(current);
+            return (i !== -1 && i + 1 < OVERLOAD_CHAIN.length) ? OVERLOAD_CHAIN[i + 1] : null;
+        }
         function getActiveModel() {
+            if (window._overloadModel) return window._overloadModel;  // active overload downgrade
             if (settings.model === 'custom') return settings.customModel;
             const m = MODEL_LIST[settings.model];
             if (!m) return settings.model;
@@ -1971,6 +2206,32 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
         }
 
+        // --- Default Hub Skills (auto-installed from the Hub on new-Being creation) ---
+        // Names listed here are pulled from the Skill Hub via window.hubInstall the first
+        // time a Being is created (newBeing only — existing Beings are left untouched).
+        // This is the Hub-sourced counterpart to DEFAULT_SKILLS above: edit the list to
+        // curate which community skills every fresh Being boots with. Unknown names just
+        // log a failure and are skipped; ordering is preserved so dependencies can come first.
+        const DEFAULT_HUB_SKILLS = [
+            "web_search_proxy",   // [Yuzu's Fork] Web Search & Read (Proxy Anti-Block Edition)
+        ];
+
+        async function installDefaultHubSkills() {
+            if (!DEFAULT_HUB_SKILLS.length) return;
+            if (typeof window.hubInstall !== "function") {
+                console.warn("[seed-hub] hubInstall unavailable; skipping default hub skills");
+                return;
+            }
+            for (const name of DEFAULT_HUB_SKILLS) {
+                try {
+                    const ok = await window.hubInstall(name);
+                    console.log("[seed-hub]", name, ok ? "installed" : "failed");
+                } catch (e) {
+                    console.error("[seed-hub] install failed:", name, e);
+                }
+            }
+        }
+
         // --- State Management ---
         var currentBeingId = null;
         var consciousness = "";
@@ -1978,6 +2239,8 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         var cacheName = null;            // Gemini cache ID
         var _cachedStableHead = null;    // in-memory only; gemini cache invalidates if stableHead changes mid-session
         var loopRunning = false;
+        var _loopPromise = null;         // the running loop() chain, so leaveBeing() can await its end
+        var _stopRequested = false;      // set by leaveBeing(); loop() checks it between steps
         var currentUserInput = null;
         var currentAbortController = null;
         var _saveBeingTimer = null;
@@ -2046,7 +2309,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 const opt = document.createElement('option');
                 opt.value = s.id;
                 const fallback = /^[0-9a-f]{16,}$/.test(s.id) ? ('b_' + s.id.slice(0, 8)) : s.id;
-                opt.textContent = s.name || s.title || fallback;
+                // The being's own name, else its short id; never derived from the chat, so it only
+                // changes when the being names itself
+                opt.textContent = s.name || fallback;
                 beingSelect.appendChild(opt);
             });
             if(currentBeingId) beingSelect.value = currentBeingId;
@@ -2067,12 +2332,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
             const existing = await DB.get(currentBeingId);
             const name = existing?.name || '';
-            let title = existing?.title || currentBeingId;
-            const userMatch = consciousness.match(/\n\n(?!\[System|\*\*(?:Digital Being|Assistant)|System -)([^\n].{0,30})/);
-            if (userMatch) {
-                title = userMatch[1].replace(/\n/g, ' ').trim().substring(0, 15) + '...';
-            }
-            await DB.put({ id: currentBeingId, name, title, cachedLength, cacheName, promptTokens: _lastPromptTokens, cachedTokens: _lastCachedTokens, updatedAt: Date.now() });
+            await DB.put({ id: currentBeingId, name, cachedLength, cacheName, promptTokens: _lastPromptTokens, cachedTokens: _lastCachedTokens, updatedAt: Date.now() });
             await DB.put({ id: `${currentBeingId}/consciousness.txt`, value: consciousness });
             try {
                 const htmlDiv = document.getElementById('html-div');
@@ -2099,11 +2359,14 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         }
 
         async function renderHistory(keepUI = false) {
-            chatBox.innerHTML = '<div class="msg ai">System online. Initializing.</div>';
             if (!consciousness) {
+                chatBox.innerHTML = '<div class="msg ai">System online. Initializing.</div>';
                 if (!keepUI) { cancelAllAnimations(); canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height); document.getElementById('html-div').innerHTML = ''; }
                 return;
             }
+            // Build offscreen, swap once — a live rebuild flashes an empty chat on every idle sync
+            window._renderTarget = document.createDocumentFragment();
+            try {
 
             // Only render the last 100k characters to keep UI responsive
             const RENDER_LIMIT = 100000;
@@ -2142,6 +2405,11 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     appendMsgUI('system', trimmed);
                 }
             }
+            } finally {
+                const frag = window._renderTarget;
+                window._renderTarget = null;
+                if (frag) chatBox.replaceChildren(frag);
+            }
             scrollToBottom(true);
             if (keepUI) return;
             cancelAllAnimations();
@@ -2154,7 +2422,86 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
         }
 
+        // Stop this being's loop and persist it before another being takes over the page.
+        // Paused, not discarded: a cancelled turn's input stays in its consciousness.
+        async function leaveBeing() {
+            beingSelect.disabled = true;
+            clearTimeout(dispatchTimer); dispatchTimer = null;
+            clearTimeout(autoInferTimer); autoInferTimer = null;
+            currentUserInput = null;
+            if (loopRunning) {
+                setStatus('Stopping...');
+                _stopRequested = true;
+                if (currentAbortController) currentAbortController.abort();
+                const running = _loopPromise;
+                if (running) await running.catch(() => {});
+                _stopRequested = false;
+            }
+            _pendingHandoff = null;
+            window._overloadModel = null;
+            if (currentBeingId) await saveBeing();
+        }
+
+        // URL that boots straight into a being (?being=<id>) or a fresh one (?new).
+        function _beingUrl(id) {
+            const u = new URL(location.href);
+            u.search = id ? '?being=' + encodeURIComponent(id) : '?new';
+            return u.toString();
+        }
+
+        // Switching reloads the page: the old being's skill code (timers, observers,
+        // listeners, prototype patches) can't keep running and act on the new being.
+        // One tab per being: a tab holds a Web Lock on the being it shows for the life of the
+        // page, so two tabs never run the same being. The lock is released explicitly before
+        // navigating away: browsers may keep the old page in the back/forward cache, still
+        // holding its lock, and this tab would then see its own previous being as "open elsewhere".
+        const _beingLockName = id => 'genesis-being:' + id;
+        let _releaseBeingLock = null;
+        function _leavePage(url) {
+            if (_releaseBeingLock) { _releaseBeingLock(); _releaseBeingLock = null; }
+            location.assign(url);
+        }
+        // Restored from the back/forward cache: the lock was given up on leaving, so reload
+        window.addEventListener('pageshow', e => { if (e.persisted) location.reload(); });
+        function _lockBeing(id, waitMs = 0) {
+            if (!navigator.locks) return Promise.resolve(true);
+            return new Promise(resolve => {
+                // waitMs: the tab we just navigated away from may still be releasing this lock
+                const opts = waitMs ? { signal: AbortSignal.timeout(waitMs) } : { ifAvailable: true };
+                navigator.locks.request(_beingLockName(id), opts, lock => {
+                    resolve(!!lock);
+                    if (lock) return new Promise(r => { _releaseBeingLock = r; });   // held until released or unload
+                }).catch(() => resolve(false));               // timed out: open in another tab
+            });
+        }
+        async function _beingOpenElsewhere(id) {
+            if (!navigator.locks || id === currentBeingId) return false;
+            const { held } = await navigator.locks.query();
+            return held.some(l => l.name === _beingLockName(id));
+        }
+        function _beingLabel(id) {
+            const opt = [...beingSelect.options].find(o => o.value === id);
+            return opt ? `"${opt.textContent}"` : 'That being';
+        }
+
         async function switchBeing(id) {
+            if (id === currentBeingId) return;
+            if (await _beingOpenElsewhere(id)) {
+                beingSelect.value = currentBeingId;
+                appendMsgUI('system', `${_beingLabel(id)} is open in another tab. Switch to that tab to use it.`);
+                return;
+            }
+            try {
+                await leaveBeing();
+            } catch (e) {
+                beingSelect.disabled = false;
+                beingSelect.value = currentBeingId;
+                throw e;
+            }
+            _leavePage(_beingUrl(id));
+        }
+
+        async function loadBeing(id) {
             currentBeingId = id;
             delete window._identity;
             try {
@@ -2167,7 +2514,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     try { (0, eval)(js); console.log('[skill] code reloaded:', s.name); }
                     catch (e) { console.error('[skill] code eval failed:', s.name, e); }
                 }
-            } catch (e) { console.error('[switchBeing] skill init failed', e); }
+            } catch (e) { console.error('[loadBeing] skill init failed', e); }
             const being = await DB.get(id);
             const consciousnessRecord = await DB.get(`${id}/consciousness.txt`);
             if (consciousnessRecord) {
@@ -2198,6 +2545,13 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         }
 
         async function newBeing() {
+            try {
+                await leaveBeing();
+            } catch (e) { beingSelect.disabled = false; throw e; }
+            _leavePage(_beingUrl(null));
+        }
+
+        async function createBeing() {
             if (typeof window.identityCreateFresh !== 'function') {
                 const idSkill = DEFAULT_SKILLS.find(s => s.name === 'identity_seed');
                 if (!idSkill || !idSkill.code) throw new Error('identity_seed default skill missing');
@@ -2208,6 +2562,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
             const fresh = await window.identityCreateFresh();
             currentBeingId = fresh.pubkey;
+            await _lockBeing(currentBeingId);
             delete window._identity;
             consciousness = '';
             cachedLength = 0;
@@ -2227,7 +2582,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     try { (0, eval)(js); console.log('[skill] code reloaded:', s.name); }
                     catch (e) { console.error('[skill] code eval failed:', s.name, e); }
                 }
-            } catch (e) { console.error('[newBeing] skill init failed', e); }
+            } catch (e) { console.error('[createBeing] skill init failed', e); }
+            // Auto-install the curated set of Hub skills into this fresh Being.
+            // Runs after the local defaults are seeded + eval'd so hubInstall/HUB_BASE exist.
+            try { await installDefaultHubSkills(); } catch (e) { console.error('[createBeing] hub skill load failed', e); }
             renderHistory();
             // If remote host is online, handoff new being; otherwise auto-infer locally
             const remoteHost = settings.hostDevice;
@@ -2240,21 +2598,22 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
 
         async function duplicateBeing() {
             if (!confirm('Fork this being? Dynamic UI elements will need to be redrawn by waking the AI.')) return;
+            await leaveBeing();
             const sourceId = currentBeingId;
             currentBeingId = 'being_fork_' + Date.now();
             const note = `\n\n[System] Being forked from ${sourceId} → ${currentBeingId} at ${new Date().toLocaleString()}\n\n`;
             consciousness += note;
             await saveBeing();
             try { await seedDefaultSkills(currentBeingId); } catch (e) { console.error('[duplicateBeing] seed failed', e); }
-            renderHistory();
+            _leavePage(_beingUrl(currentBeingId));
         }
 
         async function deleteBeing() {
             if(confirm('Destroy this Being? This cannot be undone.')) {
+                await leaveBeing();
                 await DB.del(`${currentBeingId}/consciousness.txt`);
                 await DB.del(currentBeingId);
-                currentBeingId = null;
-                await initApp();
+                _leavePage(location.pathname);   // boot picks the most recent being
             }
         }
 
@@ -2280,26 +2639,34 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     event.target.value = '';
                     return;
                 }
+                await leaveBeing();
                 for (const r of records) await DB.put(r);
-                currentBeingId = sourceId;
-                await switchBeing(sourceId);
+                _leavePage(_beingUrl(sourceId));
+                return;
             } catch(e) {
+                beingSelect.disabled = false;
                 console.error('[importBeing]', e);
                 alert(`Failed to import being: ${e.message}`);
             }
             event.target.value = '';
         }
 
-        async function initApp() {
-            const beings = (await DB.list()).filter(s => !s.id.includes('/'));
-            if (beings.length === 0) {
-                await newBeing();
-            } else {
-                if (!currentBeingId || !beings.find(s => s.id === currentBeingId)) {
-                    currentBeingId = beings.sort((a, b) => b.updatedAt - a.updatedAt)[0].id;
+        // Open the requested being, else the most recent one, skipping beings open in other tabs.
+        async function initApp(requested) {
+            const beings = (await DB.list()).filter(s => !s.id.includes('/'))
+                .sort((a, b) => b.updatedAt - a.updatedAt).map(s => s.id);
+            const wanted = beings.includes(requested) ? requested : null;
+            const order = wanted ? [wanted, ...beings.filter(id => id !== wanted)] : beings;
+            for (const id of order) {
+                if (!(await _lockBeing(id, id === wanted ? 1500 : 0))) continue;
+                await loadBeing(id);
+                if (id !== order[0]) {
+                    appendMsgUI('system', `${_beingLabel(order[0])} is open in another tab, so this tab opened ${_beingLabel(id)}.`);
                 }
-                await switchBeing(currentBeingId);
+                return;
             }
+            await createBeing();
+            if (beings.length) appendMsgUI('system', 'Every being is already open in another tab, so this tab created a new one.');
         }
 
         var _justReloaded = false;
@@ -2353,10 +2720,12 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     deviceLines += `\n      ${currentBeingId}/{filename} → arbitrary {id, ...} storage`;
                     deviceLines += `\n    - UI: .right-panel #canvas-container > #html-div (living UI, auto-saved) + #main-canvas`;
                     deviceLines += `\n         .left-panel #chat-box + #input + #send-btn`;
+                    deviceLines += `\n    - View: write "/view <ref>" on its own line — the image is loaded into your visual context at that point in your consciousness stream (persists as a <<<IMAGE:...>>> marker; auto-downscaled to ≤1536px; fades only when compression archives it). ref = IndexedDB key (record .value/.text/.data/.image holding a data URL, base64, or Blob), a fetchable URL (use /api/proxy?url={url} for CORS), or <device>:<path> to read a file from an online shell device (≤5MB). The human can attach images too (📷/paste) — they arrive as /view lines referencing ${currentBeingId}/uploads/* keys.`;
+                    deviceLines += `\n    - Pull: await relayFileRead('<device>', '<path>') in exec browser returns a Blob of any device file (≤5MB, E2E-encrypted, no token cost) — store via DB.put, process with Pyodide, render, whatever you need.`;
                 }
                 deviceLines += `\n    - Canvas: ${Math.round(w)}×${Math.round(h)}px | Vision: ${visionInfo}`;
                 deviceLines += `\n    - Capabilities: DOM/UI, canvas/WebGL, fetch (/api/proxy?url={url} — transparent CORS proxy, returns raw response; use r.jina.ai/{url} to read web pages as plain text), IndexedDB, FileSystem API, Pyodide, WASM, Speech (neural TTS APIs preferred; WebSpeech as fallback), MediaDevices(camera, mic)`;
-                deviceLines += `\n    - Exec (MUST use this exact format — wrong format = code displayed as text, never executed):\n/exec browser\n\`\`\`javascript\n// your code here\n// CRITICAL for canvas: never set canvas.width/height; use const { width: w, height: h } = document.getElementById('canvas-container').getBoundingClientRect();\n// return value — use for immediate results (sync or async): the value is passed to context right away.
+                deviceLines += `\n    - Exec (MUST use this exact format — wrong format = code displayed as text, never executed):\n/exec browser\n\`\`\`javascript\n// your code here\n// CRITICAL for canvas: host already sized the backing store and did ctx.scale(DPR), so you draw in CSS px.\n// Never READ canvas.width/height (device px, DPR× too big); never SET them (wipes the host's scale).\n// Take ALL coords/fonts from document.getElementById('canvas-container').getBoundingClientRect().\n// return value — use for immediate results (sync or async): the value is passed to context right away.
 // trigger(value) — use for deferred wakeup: e.g. attach to a button click or async callback to resume the loop later when an event fires.\n\`\`\``;
             }
             // shells after (online only)
@@ -2380,7 +2749,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 deviceLines += `\n  - ${name}(online, ${dtype})${isHost ? ' [core loop host]' : ''}`;
             }
             const deviceSection = deviceLines ? `\nDevices (expandable — user can add via Settings > Add Device; inspect initRelay() for protocol details): ${deviceLines}` : '';
-            let ctx = `[Realtime]\nReminder: end with /self_continue or /call_for_trigger${deviceSection}`;
+            const turnNote = window._cycleHadUserInput
+                ? 'New external input arrived this cycle.'
+                : 'No new user input since your last message — what follows is only the result of your own previous action. Write only what is new this cycle.';
+            let ctx = `[Realtime]\nReminder: end with /self_continue or /call_for_trigger\n${turnNote}${deviceSection}`;
 
             const ui = document.getElementById('html-div');
             if (_justReloaded) {
@@ -2528,25 +2900,66 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
         }
         _statusInterval = setInterval(() => { _statusFlip = !_statusFlip; renderStatus(); }, 3000);
 
+        async function _resolveMarkerRec(key) {
+            let rec = await DB.get(key).catch(() => null);
+            if (rec && typeof rec.value === 'string') return rec;
+            // Agent-side /view stores the image on the device; the synced marker is a
+            // device-local path. Pull it over the relay once and cache it in IndexedDB.
+            if (key.startsWith('/') || key.startsWith('~') || /^[A-Za-z]:\\/.test(key)) {
+                const host = settings.hostDevice;
+                if (host && host !== 'this browser' && settings.devices?.[host]?.online) {
+                    try {
+                        const blob = await relayFileRead(host, key);
+                        const b64 = await new Promise((res, rej) => {
+                            const r = new FileReader();
+                            r.onload = () => res(r.result.split(',')[1]);
+                            r.onerror = () => rej(new Error('read failed'));
+                            r.readAsDataURL(blob);
+                        });
+                        rec = { id: key, value: b64, media_type: blob.type || 'image/jpeg' };
+                        await DB.put(rec);
+                        return rec;
+                    } catch (e) { console.warn(`[view] device image fetch failed: ${key}`, e.message); }
+                }
+            }
+            return null;
+        }
+
+        async function _hydrateViewThumbs(div) {
+            for (const img of div.querySelectorAll('img.view-thumb[data-view-key]')) {
+                const key = decodeURIComponent(img.dataset.viewKey);
+                const rec = await _resolveMarkerRec(key);
+                if (rec && typeof rec.value === 'string') {
+                    img.src = `data:${rec.media_type || 'image/jpeg'};base64,${rec.value}`;
+                    img.removeAttribute('data-view-key');
+                } else {
+                    img.replaceWith(document.createTextNode(`<<<IMAGE:${key}>>>`));
+                }
+            }
+        }
+
         function appendMsgUI(role, text) {
             if (text === "System - [Auto] - Please continue.") return null;
+            const target = window._renderTarget || chatBox;
             const div = document.createElement('div');
             if (role === 'timestamp') {
-                const prev = chatBox.lastElementChild;
+                const prev = target.lastElementChild;
                 if (prev?.classList.contains('msg-timestamp')) prev.remove();
                 div.className = 'msg-timestamp';
                 div.textContent = text;
             } else {
                 div.className = `msg ${role}`;
-                div.innerHTML = marked.parse(text);
+                const withThumbs = text.replace(IMG_MARKER_RE, (_, k) => `<img class="view-thumb" data-view-key="${encodeURIComponent(k)}">`);
+                div.innerHTML = marked.parse(withThumbs);
+                if (withThumbs !== text) _hydrateViewThumbs(div);
                 if (role === 'user') {
                     div.dataset.userText = text;
                     div.style.cursor = 'pointer';
                     div.addEventListener('click', () => timeRewind(div));
                 }
             }
-            chatBox.appendChild(div);
-            scrollToBottom();
+            target.appendChild(div);
+            if (target === chatBox) scrollToBottom();
             return div;
         }
 
@@ -2661,14 +3074,22 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             document.getElementById('settings-panel').style.display = 'none';
             if (getActiveModel() !== oldModel || getActiveFormat() !== oldFormat) { cacheName = null; cachedLength = 0; _cachedStableHead = null; }
             // Broadcast updated LLM settings to all connected devices
+            // Peer device keys so whichever device is host can encrypt exec for its peers.
+            const deviceKeys = {};
+            for (const [n, d] of Object.entries(settings.devices || {})) {
+                if (d.keyB64) deviceKeys[n] = d.keyB64;
+            }
             relayEncBroadcast('settings_update', {
+                deviceKeys,
                 settings: {
                     model: getActiveModel(),
                     provider: settings.provider,
                     token: getActiveToken(),
                     format: getActiveFormat(),
                     thinking: settings.thinking || false,
+                    thinking_mode: MODEL_LIST[settings.model]?.thinkingMode || null,
                     endpoint: getActiveEndpoint(),
+                    compressCfg: MODEL_LIST[settings.model]?.compress || null,
                     system_prompt: SYSTEM_INSTRUCTION,
                     client_id: CLIENT_ID
                 }
@@ -2710,10 +3131,20 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
             function connect() {
                 if (_relayGeneration !== gen) return;
+                if (_relayWs) {
+                    // Kill any previous socket (may still be CONNECTING/OPEN) so two
+                    // live connections never deliver every message twice.
+                    _relayWs.onclose = null; _relayWs.onmessage = null;
+                    try { _relayWs.close(); } catch (_) {}
+                    _relayWs = null;
+                }
+                let ws;
                 try {
-                    _relayWs = new WebSocket(url);
+                    ws = new WebSocket(url);
                 } catch (e) { scheduleReconnect(); return; }
-                _relayWs.onopen = () => {
+                _relayWs = ws;
+                ws.onopen = () => {
+                    if (ws !== _relayWs) { try { ws.close(); } catch (_) {} return; }
                     _relayConnected = true;
                     _retryCount = 0;
                     // Cancel pending disconnect notification — silent reconnect
@@ -2727,24 +3158,25 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     renderDeviceList();
                     startHeartbeat();
                 };
-                _relayWs.onmessage = (e) => {
+                ws.onmessage = (e) => {
+                    if (ws !== _relayWs) return;
                     try {
                         const msg = JSON.parse(e.data);
                         if (msg.type === 'pong') { clearTimeout(_relayPongTimer); return; }
                         handleRelayMessage(msg);
                     } catch (_) {}
                 };
-                _relayWs.onclose = () => {
+                ws.onclose = () => {
+                    if (ws !== _relayWs) return;
                     _relayConnected = false;
                     stopHeartbeat();
                     const hadOnline = settings.devices && Object.values(settings.devices).some(d => d.online && !d.hidden);
                     if (settings.devices) Object.values(settings.devices).forEach(d => d.online = false);
-                    // Auto takeover if host device is now unreachable
+                    // No auto-takeover: the host device keeps running through relay blips.
+                    // Only a manual switch changes hostDevice.
                     if (settings.hostDevice !== 'this browser') {
-                        console.log(`[relay] Relay lost, taking over from ${settings.hostDevice}`);
-                        settings.hostDevice = 'this browser';
-                        saveSettingsToStorage(settings);
-                        setStatus('Ready');
+                        console.log(`[relay] Relay lost — keeping host ${settings.hostDevice}, awaiting reconnect`);
+                        setStatus('Reconnecting...');
                     }
                     renderDeviceList();
                     // Delay notification 3s — give silent reconnect a chance
@@ -2758,7 +3190,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     }
                     scheduleReconnect();
                 };
-                _relayWs.onerror = () => { _relayWs.close(); };
+                ws.onerror = () => { try { ws.close(); } catch (_) {} };
             }
             function startHeartbeat() {
                 stopHeartbeat();
@@ -3013,6 +3445,21 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
         }
 
+        var _pendingFileReads = {};
+        function relayFileRead(deviceName, path, timeoutMs = 30000) {
+            return new Promise((resolve, reject) => {
+                if (!settings.devices?.[deviceName]?.online) return reject(new Error(`device offline: ${deviceName}`));
+                const req_id = crypto.randomUUID();
+                const timer = setTimeout(() => { delete _pendingFileReads[req_id]; reject(new Error(`file_read timeout (${timeoutMs / 1000}s): ${deviceName}:${path}`)); }, timeoutMs);
+                _pendingFileReads[req_id] = {
+                    chunks: [], got: 0, mime: '',
+                    resolve: v => { clearTimeout(timer); resolve(v); },
+                    reject: e => { clearTimeout(timer); reject(e); }
+                };
+                relayEncSend(deviceName, 'file_read', { path, req_id });
+            });
+        }
+
         async function relayDec(msg) {
             const sender = msg.sender || msg.device_name;
             const info = settings.devices?.[sender];
@@ -3111,36 +3558,25 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 if (_wasDeleted) window._removedDevices.delete(device_name);
                 const note = `System - [Device] - ${device_name} ${_wasDeleted ? 'deleted' : (online ? 'is now online' : 'is now offline')}`;
                 // Only emit chat noise for KNOWN paired devices; unregistered ones surface via the orange dot in Settings.
-                if (settings.devices[device_name]) appendMsgUI('system', note);
+                // Announce only real transitions: relay-WS reconnects silently reset .online=false,
+                // so compare against the last *announced* status, not the reset value.
+                if (!window._devAnnounced) window._devAnnounced = {};
+                if (settings.devices[device_name] && window._devAnnounced[device_name] !== online) {
+                    window._devAnnounced[device_name] = online;
+                    appendMsgUI('system', note);
+                }
                 // Don't write device status to consciousness — reconnection noise pollutes AI context
-                // Auto takeover if core loop host went offline
+                // No auto-takeover: host stays pinned until the user switches manually.
                 if (!online && settings.hostDevice === device_name) {
-                    console.log(`[relay] Core loop host ${device_name} went offline, auto takeover`);
-                    settings.hostDevice = 'this browser';
-                    saveSettingsToStorage(settings);
-                    renderDeviceList();
-                    setStatus('Ready');
+                    console.log(`[relay] Core loop host ${device_name} went offline — keeping it as host`);
+                    setStatus('Host offline');
                 }
-                // Preferred device came back online — try sync then handoff
-                if (online && settings.preferredHost === device_name && settings.hostDevice !== device_name) {
-                    console.log(`[relay] Preferred host ${device_name} is back online, sync then handoff`);
-                    window._forkPoint = consciousness.length;
-                    window._syncThenHandoff = device_name;
-                    if (_relayWs && _relayConnected) {
-                        _relayWs.send(JSON.stringify({ type: 'consciousness_sync', device_name, being_id: currentBeingId, action: 'request' }));
-                        setStatus('Syncing...');
-                        // Timeout: if no sync response in 3s, handoff anyway
-                        setTimeout(() => {
-                            if (window._syncThenHandoff === device_name) {
-                                console.log(`[relay] Sync timeout — device unresponsive, staying on browser`);
-                                window._syncThenHandoff = null;
-                                setStatus('Ready');
-                            }
-                        }, 3000);
-                    }
-                }
-                // Host device is online — sync consciousness first, then handoff if needed
-                if (online && settings.hostDevice === device_name && !window._remoteLoopRunning) {
+                // No auto-handoff to a returning preferred device: host changes are manual only.
+                // Fork resolution is decided by the human via askForkChoice.
+                // Host device is online — sync consciousness first, then handoff if needed.
+                // No _remoteLoopRunning guard: output streamed while our WS was down only
+                // exists on the device; without this sync it never reaches the screen.
+                if (online && settings.hostDevice === device_name) {
                     console.log(`[relay] Host ${device_name} is online, syncing consciousness...`);
                     window._forkPoint = consciousness.length;
                     window._syncThenHandoff = device_name;
@@ -3149,9 +3585,15 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                         setStatus('Syncing...');
                         setTimeout(() => {
                             if (window._syncThenHandoff === device_name) {
-                                console.log(`[relay] Host sync timeout, handing off to re-establish worker`);
                                 window._syncThenHandoff = null;
-                                doHandoff(device_name);
+                                if (window._remoteLoopRunning) {
+                                    // Loop is mid-inference — don't restart the worker, stream will resume
+                                    console.log(`[relay] Host sync timeout but loop running — staying Remote`);
+                                    setStatus('Remote');
+                                } else {
+                                    console.log(`[relay] Host sync timeout, handing off to re-establish worker`);
+                                    doHandoff(device_name);
+                                }
                             }
                         }, 3000);
                     }
@@ -3215,11 +3657,29 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
 
             // ─── Distributed loop messages ───────────────────────────────
             if (msg.type === 'stream_token') {
-                if (settings.hostDevice === 'this browser') return;
+                if (settings.hostDevice === 'this browser') {
+                    // A device is streaming but we think we host — usually a stale
+                    // auto-takeover after a relay blip. If we're idle, re-adopt the
+                    // sender as host and keep rendering instead of dropping silently.
+                    const sender = msg.sender;
+                    if (!loopRunning && sender && settings.devices?.[sender]) {
+                        console.warn(`[stream] token from ${sender} while hostDevice=browser & idle — re-adopting remote host`);
+                        settings.hostDevice = sender;
+                        saveSettingsToStorage(settings);
+                        renderDeviceList();
+                        setStatus('Remote');
+                    } else {
+                        console.warn(`[stream] DROPPED stream_token from ${sender}: hostDevice=browser, loopRunning=${loopRunning}`);
+                        return;
+                    }
+                }
                 const dec = await relayDec(msg);
-                if (!dec) return;
+                if (!dec) { console.warn(`[stream] DROPPED stream_token from ${msg.sender}: decrypt failed`); return; }
                 const { content } = dec;
-                if (content.being_id && content.being_id !== currentBeingId) return;
+                if (content.being_id && content.being_id !== currentBeingId) {
+                    console.warn(`[stream] DROPPED stream_token: being ${content.being_id?.slice(0,8)} ≠ current ${currentBeingId?.slice(0,8)}`);
+                    return;
+                }
                 if (!window._remoteAiDiv) {
                     window._remoteAiDiv = document.createElement('div');
                     window._remoteAiDiv.className = 'msg ai';
@@ -3234,17 +3694,26 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     if (content.text_delta) window._remoteAiText += content.text_delta;
                     if (content.thinking_delta) window._remoteThinkText += content.thinking_delta;
                 }
-                if (!window._remoteRenderQueued) {
+                const renderRemoteDiv = () => {
+                    if (!window._remoteAiDiv) return;
+                    // renderHistory (sync) rebuilds chatBox and detaches the live div — re-attach
+                    if (!window._remoteAiDiv.isConnected) chatBox.appendChild(window._remoteAiDiv);
+                    const displayText = (window._remoteAiText || '').replace(/^\*{0,2}[A-Za-z][\w\s]{0,29}\*{0,2}\s*[-–—]\s*\[[^\]\n]*\d[^\]\n]*\]\*{0,2}\n?/, '');
+                    let html = window._remoteThinkText ? `<div class="msg-thinking">${marked.parse(window._remoteThinkText)}</div>` : '';
+                    html += marked.parse(displayText);
+                    window._remoteAiDiv.innerHTML = html;
+                    window._remoteAiDiv.querySelectorAll('pre').forEach(pre => { pre.scrollTop = pre.scrollHeight; });
+                    scrollToBottom();
+                };
+                if (content.done) {
+                    // Render the final text synchronously — a queued rAF would see
+                    // _remoteAiDiv already nulled below and skip it.
+                    renderRemoteDiv();
+                } else if (!window._remoteRenderQueued) {
                     window._remoteRenderQueued = true;
                     requestAnimationFrame(() => {
                         window._remoteRenderQueued = false;
-                        if (!window._remoteAiDiv) return;
-                        const displayText = (window._remoteAiText || '').replace(/^\*{0,2}[A-Za-z][\w\s]{0,29}\*{0,2}\s*[-–—]\s*\[[^\]\n]*\d[^\]\n]*\]\*{0,2}\n?/, '');
-                        let html = window._remoteThinkText ? `<div class="msg-thinking">${marked.parse(window._remoteThinkText)}</div>` : '';
-                        html += marked.parse(displayText);
-                        window._remoteAiDiv.innerHTML = html;
-                        window._remoteAiDiv.querySelectorAll('pre').forEach(pre => { pre.scrollTop = pre.scrollHeight; });
-                        scrollToBottom();
+                        renderRemoteDiv();
                     });
                 }
                 if (content.done) {
@@ -3296,11 +3765,35 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             }
 
             if (msg.type === 'exec_display') {
+                if (msg.plain) { appendMsgUI('system', msg.plain); return; }
                 const dec = await relayDec(msg);
                 if (!dec) return;
                 const { content } = dec;
                 if (content.being_id && content.being_id !== currentBeingId) return;
                 if (content.text) appendMsgUI('system', content.text.trim());
+            }
+
+            if (msg.type === 'file_read_result') {
+                const p = _pendingFileReads[msg.req_id];
+                if (!p) return;
+                const dec = await relayDec(msg);
+                if (!dec) return;
+                if (dec.content.error) {
+                    delete _pendingFileReads[msg.req_id];
+                    p.reject(new Error(dec.content.error));
+                    return;
+                }
+                p.chunks[msg.seq] = dec.content.data;
+                p.mime = dec.content.mime || p.mime;
+                p.got++;
+                if (p.got === msg.total) {
+                    delete _pendingFileReads[msg.req_id];
+                    try {
+                        const bytes = Uint8Array.from(atob(p.chunks.join('')), c => c.charCodeAt(0));
+                        p.resolve(new Blob([bytes], { type: p.mime }));
+                    } catch (e) { p.reject(e); }
+                }
+                return;
             }
 
             if (msg.type === 'request_device_data') {
@@ -3357,7 +3850,11 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     changed = await mergeConsciousness(runner, remoteConsciousness);
                 }
                 window._forkPoint = consciousness.length;
-                if (changed && !window._syncStoppedRunner) renderHistory();
+                // Render unconditionally on change: the idle-sync path sets
+                // _syncStoppedRunner before this line, which used to suppress the
+                // redraw — synced output then only appeared after a manual refresh.
+                // keepUI: a live sync must not wipe canvas/html-div (visible flash).
+                if (changed) renderHistory(true);
                 if (window._syncStoppedRunner === runner) {
                     // Post-stop sync complete — decide next action
                     window._syncStoppedRunner = null;
@@ -3366,9 +3863,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                         const target = _pendingHandoff;
                         _pendingHandoff = null;
                         doHandoff(target);
-                    } else if (settings.preferredHost === runner && settings.hostDevice !== runner && !window._manualTakeover) {
-                        console.log(`[relay] Synced with preferred host ${runner}, handing off`);
-                        doHandoff(runner);
                     } else if (settings.hostDevice === 'this browser') {
                         window._manualTakeover = false;
                         setStatus('Ready');
@@ -3379,8 +3873,19 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     updateSendBtn();
                 } else if (window._syncThenHandoff === runner) {
                     window._syncThenHandoff = null;
-                    if (changed) {
+                    if (changed && !window._remoteLoopRunning) {
                         console.log(`[relay] Sync done from ${runner}, merged — handing off merged consciousness`);
+                        doHandoff(runner);
+                    } else if (changed) {
+                        console.log(`[relay] Sync done from ${runner}, merged — loop running, staying Remote`);
+                        settings.hostDevice = runner;
+                        saveSettingsToStorage(settings);
+                        renderDeviceList();
+                        setStatus('Remote');
+                    } else if (!remoteConsciousness && !window._remoteLoopRunning) {
+                        // The host doesn't have this being yet: switching beings reloads the page, so
+                        // boot's handoff ran before the relay was up. Hand it over now.
+                        console.log(`[relay] Sync done from ${runner}, empty — handing off ${currentBeingId}`);
                         doHandoff(runner);
                     } else {
                         console.log(`[relay] Sync done from ${runner}, ${remoteConsciousness ? remoteConsciousness.length + ' chars' : 'empty'} — staying in Remote mode`);
@@ -3528,7 +4033,6 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             if (!confirm(`Switch core loop host?\n\n${fromLabel}  →  ${toLabel}`)) { console.log(`[setHostDevice] CANCELLED by user`); return; }
             console.log(`[setHostDevice] CONFIRMED ${fromLabel} → ${toLabel}`);
             settings.hostDevice = name;
-            settings.preferredHost = name;
             saveSettingsToStorage(settings);
             renderDeviceList();
 
@@ -3605,14 +4109,16 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             const localDelta = consciousness.slice(fp);
             const remoteDelta = remoteConsciousness.slice(fp);
             if (remoteDelta && localDelta) {
-                const useRemote = remoteConsciousness.length >= consciousness.length;
+                // Real fork: both sides wrote after the common prefix — the human decides.
+                if (window._forkModalOpen) { console.log('[relay] Fork modal already open, skipping this sync'); return false; }
+                const useRemote = await askForkChoice(runner, localDelta, remoteDelta);
                 const winner = useRemote ? 'remote' : 'local';
                 const archived = useRemote ? consciousness : remoteConsciousness;
                 consciousness = useRemote ? remoteConsciousness : consciousness;
                 const archiveKey = currentBeingId + '/context_log_' + Date.now() + '.txt';
                 try {
-                    const tx = db.transaction('beings', 'readwrite');
-                    tx.objectStore('beings').put({ id: archiveKey, value: archived });
+                    const idb = await new Promise((res, rej) => { const req = indexedDB.open('GenesisDB'); req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
+                    idb.transaction('beings', 'readwrite').objectStore('beings').put({ id: archiveKey, value: archived });
                 } catch(e) { console.warn('[relay] archive failed:', e); }
                 appendMsgUI('system', `Consciousness fork: took ${winner} (${consciousness.length} chars), archived ${winner === 'remote' ? 'local' : 'remote'} (${archived.length} chars)`);
                 console.log(`[relay] Fork resolved: took ${winner}. Local: ${localDelta.length}, Remote: ${remoteDelta.length}. Archived loser.`);
@@ -3627,6 +4133,37 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             window._forkPoint = 0;
             await saveBeing();
             return true;
+        }
+
+        function askForkChoice(runner, localDelta, remoteDelta) {
+            window._forkModalOpen = true;
+            const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            const tail = s => esc(s.length > 400 ? '…' + s.slice(-400) : s);
+            return new Promise(resolve => {
+                const ov = document.createElement('div');
+                ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;';
+                ov.innerHTML = `
+                  <div style="background:#111827;border:1px solid #374151;border-radius:12px;max-width:720px;width:92%;max-height:80vh;overflow:auto;padding:20px;color:#e5e7eb;font-size:13px;">
+                    <h3 style="margin:0 0 8px;">Consciousness diverged</h3>
+                    <p style="margin:0 0 14px;color:#9ca3af;">This browser and <b>${esc(runner)}</b> both continued from the same point. Choose which timeline to keep — the other is archived, not deleted.</p>
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                      <div style="flex:1;min-width:280px;">
+                        <div style="font-weight:600;margin-bottom:6px;">${esc(runner)} (+${remoteDelta.length} chars)</div>
+                        <pre style="white-space:pre-wrap;background:#0b0f1a;border:1px solid #374151;border-radius:8px;padding:8px;max-height:200px;overflow:auto;">${tail(remoteDelta)}</pre>
+                        <button id="fork-remote" style="width:100%;margin-top:8px;padding:8px;border-radius:8px;border:0;background:#10b981;color:#fff;cursor:pointer;">Continue from ${esc(runner)}</button>
+                      </div>
+                      <div style="flex:1;min-width:280px;">
+                        <div style="font-weight:600;margin-bottom:6px;">This browser (+${localDelta.length} chars)</div>
+                        <pre style="white-space:pre-wrap;background:#0b0f1a;border:1px solid #374151;border-radius:8px;padding:8px;max-height:200px;overflow:auto;">${tail(localDelta)}</pre>
+                        <button id="fork-local" style="width:100%;margin-top:8px;padding:8px;border-radius:8px;border:0;background:#3b82f6;color:#fff;cursor:pointer;">Continue from this browser</button>
+                      </div>
+                    </div>
+                  </div>`;
+                document.body.appendChild(ov);
+                const done = useRemote => { window._forkModalOpen = false; ov.remove(); resolve(useRemote); };
+                ov.querySelector('#fork-remote').onclick = () => done(true);
+                ov.querySelector('#fork-local').onclick = () => done(false);
+            });
         }
 
         async function doHandoff(targetDevice) {
@@ -3684,7 +4221,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             if (!settings.browserRemoved && !settings.browserHidden)
                 devicesSnapshot[`${bn} · ${os}`] = { type: 'browser', online: true };
             for (const [n, d] of Object.entries(settings.devices || {})) {
-                if (!d.hidden && d.online) devicesSnapshot[n] = { type: d.type || 'shell', online: true };
+                // Include keyB64 so a device host can encrypt exec payloads for its peers
+                // (device↔device E2E: relay never re-keys, each device only shares a key with the browser).
+                if (!d.hidden && d.online) devicesSnapshot[n] = { type: d.type || 'shell', online: true, keyB64: d.keyB64 || null };
             }
             const hiddenDevices = Object.entries(settings.devices || {}).filter(([,d]) => d.hidden).map(([n]) => n);
             if (settings.browserHidden) hiddenDevices.push('this browser');
@@ -3712,7 +4251,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     token: settings.tokens?.[settings.provider] || INFERO_KEY,
                     format: getActiveFormat(),
                     thinking: settings.thinking || false,
+                    thinking_mode: MODEL_LIST[settings.model]?.thinkingMode || null,
                     endpoint: getActiveEndpoint(),
+                    compressCfg: MODEL_LIST[settings.model]?.compress || null,
                     cache_endpoint: PROVIDERS[settings.provider]?.cacheEndpoint || null,
                     system_prompt: SYSTEM_INSTRUCTION,
                     client_id: CLIENT_ID
@@ -3870,7 +4411,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 loopRunning = true;
                 updateSendBtn();
                 setStatus('Inferring...');
-                loop().finally(() => { loopRunning = false; updateSendBtn(); setStatus('Ready'); if (currentUserInput) trigger(); });
+                _loopPromise = loop().finally(() => { loopRunning = false; updateSendBtn(); setStatus('Ready'); if (currentUserInput) trigger(); });
             } else {
                 sendMessage();
             }
@@ -3881,6 +4422,39 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 sendMessage();
             }
         };
+
+        const attachBtn = document.getElementById('attach-btn');
+        const fileInput = document.getElementById('file-input');
+        attachBtn.onclick = () => fileInput.click();
+        fileInput.onchange = (e) => {
+            if (e.target.files.length) { storeUpload(e.target.files[0]); e.target.value = ''; }
+        };
+        input.addEventListener('paste', (e) => {
+            for (const item of e.clipboardData?.items || []) {
+                if (item.type.startsWith('image/')) {
+                    storeUpload(item.getAsFile());
+                    e.preventDefault();
+                    return;
+                }
+            }
+        });
+
+        async function storeUpload(file) {
+            if (!file || !file.type.startsWith('image/')) return;
+            attachBtn.textContent = '⏳'; attachBtn.disabled = true;
+            try {
+                const safe = (file.name || 'pasted.png').replace(/[^\w.-]/g, '_');
+                const key = `${currentBeingId}/uploads/${Date.now()}_${safe}`;
+                await DB.put({ id: key, value: file });
+                input.value += (input.value && !input.value.endsWith('\n') ? '\n' : '') + `/view ${key}\n`;
+                input.focus();
+                updateSendBtn();
+            } catch (e) {
+                alert('Attach failed: ' + e.message);
+            } finally {
+                attachBtn.textContent = '📷'; attachBtn.disabled = false;
+            }
+        }
 
         // Boot
         let autoInferTimer = null;
@@ -3921,7 +4495,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 loopRunning = true;
                 updateSendBtn();
                 setStatus('Inferring...');
-                loop().finally(() => {
+                _loopPromise = loop().finally(() => {
                     loopRunning = false;
                     updateSendBtn();
                     setStatus('Ready');
@@ -3939,11 +4513,12 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 loopRunning = true;
                 updateSendBtn();
                 setStatus('Inferring...');
-                loop().finally(() => { loopRunning = false; updateSendBtn(); setStatus('Ready'); if (currentUserInput) trigger(); });
+                _loopPromise = loop().finally(() => { loopRunning = false; updateSendBtn(); setStatus('Ready'); if (currentUserInput) trigger(); });
             }, 3000);
         }
 
         async function boot() {
+            window._bootDone = false;
             await DB.open();   // bootstrap IDB schema (v3 + 'beings' store) before any branch
             await loadModels();
             const params = new URLSearchParams(location.search);
@@ -3951,30 +4526,14 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             const newFlag = params.has('new');
             const hubInstallNames = skillsParam ? skillsParam.split(',').map(s => s.trim()).filter(Boolean) : [];
             if (newFlag && !hubInstallNames.length) {
-                try { await newBeing(); }
-                catch (e) { console.error('[boot] newBeing failed', e); }
-                try {
-                    if (currentBeingId) {
-                        await seedDefaultSkills(currentBeingId);
-                        const skills = await DB.listSkills(currentBeingId);
-                        for (const s of skills) {
-                            if (!s || s.enable !== true) continue;
-                            const js = skillJsCode(s.code);
-                            if (!js) continue;
-                            try { (0, eval)(js); console.log("[skill] code reloaded:", s.name); }
-                            catch (e) { console.error("[skill] code eval failed:", s.name, e); }
-                        }
-                    }
-                } catch (e) { console.error("[boot] skill init failed", e); }
-                const url = new URL(location.href);
-                url.searchParams.delete('new');
-                history.replaceState(null, '', url.toString());
+                try { await createBeing(); }
+                catch (e) { console.error('[boot] createBeing failed', e); }
             } else if (hubInstallNames.length) {
                 // Hub-experience path: never load the existing Being. Go straight to a fresh one
                 // so its skills (including any cached `code`) eval against the new context, not
-                // a stale one. newBeing() seeds defaults and evals cached code internally.
-                try { await newBeing(); }
-                catch (e) { console.error('[boot] newBeing for hub experience failed', e); }
+                // a stale one. createBeing() seeds defaults and evals cached code internally.
+                try { await createBeing(); }
+                catch (e) { console.error('[boot] createBeing for hub experience failed', e); }
                 const results = [];
                 for (const n of hubInstallNames) {
                     try { results.push({ name: n, ok: !!(await window.hubInstall(n)) }); }
@@ -3992,29 +4551,16 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                         (bad.length ? '<div style="margin-top:4px;color:#f88">✗ failed: ' + bad.map(x => '<code>' + x + '</code>').join(', ') + '</div>' : '');
                     div.insertBefore(card, div.firstChild);
                 }
-                const url = new URL(location.href);
-                url.searchParams.delete('skills');
-                history.replaceState(null, '', url.toString());
             } else {
-                await initApp();
-                try {
-                    if (currentBeingId) {
-                        await seedDefaultSkills(currentBeingId);
-                        const skills = await DB.listSkills(currentBeingId);
-                        for (const s of skills) {
-                            if (!s || s.enable !== true) continue;
-                            const js = skillJsCode(s.code);
-                            if (!js) continue;
-                            try { (0, eval)(js); console.log("[skill] code reloaded:", s.name); }
-                            catch (e) { console.error("[skill] code eval failed:", s.name, e); }
-                        }
-                    }
-                } catch (e) { console.error("[boot] skill init failed", e); }
+                await initApp(params.get('being'));
             }
+            // Keep the being in the URL so a reload (or a bookmark) reopens it
+            if (currentBeingId) history.replaceState(null, '', _beingUrl(currentBeingId));
             initRelay();
             if (!/Mobi|Android/i.test(navigator.userAgent)) input.focus();
             updateSendBtn();
             if (!consciousness) scheduleAutoInfer();
+            window._bootDone = true;   // boot finished (tests wait on this after a switch reload)
         }
 
         (async () => {

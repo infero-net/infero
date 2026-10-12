@@ -79,6 +79,7 @@ Also works from GitHub Pages, Vercel, or local `file://` (no device relay needed
 - AI output must end with `/call_for_human` or `/self_continue` — this drives the autonomous execution loop.
 - The system prompt is defined inline in `SYSTEM_INSTRUCTION` at the top of `src/index.html`.
 - Settings (model, provider, token, vision mode) stored in `localStorage.genesis_settings`.
+- One being per page: switching reloads as `?being=<id>` (`?new` for a new being) after `leaveBeing()` stops and saves the current one, and each tab holds a Web Lock on its being. Never reassign `currentBeingId` in place; go through `switchBeing` / `newBeing`. Regression test: `src/tests/multi_being_isolation/`.
 - Context compression triggers at 300k tokens, saves trimmed middle to IndexedDB.
 - Anthropic cache uses up to 4 floor-aligned breakpoints in the user content array (stable cache positions).
 - `agent.py` is loaded once at relay startup — changes require relay restart to take effect.
