@@ -20,7 +20,7 @@ fixable check, and with the fixes only issue 5's known failures remain.
 | 6 | After a switch, a paired device host never got the new being | High | **Fixed** (commit 4); regression from commit 2 |
 | 7 | Two tabs saving settings at once could still drop a paired device | Medium | **Fixed** (commits 5, 6); gap in commit 3 |
 | 8 | Switching back to a being in the same tab refused as "open in another tab" | Medium | **Fixed** (commit 6); regression from commit 3 |
-| 9 | Beings that haven't named themselves get the same label in the picker | Low | **Fixed** (commit 7); predates this branch (`72114fe`) |
+| 9 | Beings that haven't named themselves get the same label in the picker | Low | **Fixed** (commits 7, 8); predates this branch (`72114fe`) |
 
 Line numbers below refer to `src/index.html` at `a1fad55` and are approximate.
 
@@ -171,11 +171,13 @@ Found on 2026-10-09/11 while testing the branch on dev2.infero.net, by hand and 
   change it. A being with no turn yet was labelled with its full 66-character id, since its title
   started out as the id, so the short-id fallback (`b_xxxxxxxx`) was never shown. Unchanged since
   `72114fe` (2026-03-29); switching only made it visible sooner, since a switch saves at once.
-- **Fix (commit 7):** the title is the start of the human's first message, parsed the way
-  `renderHistory()` finds user input (`_firstUserText`); until there is one the title is empty and
-  the picker shows `b_xxxxxxxx`. The picker also ignores old titles that equal the id or start with
-  `/` (`_usableTitle`), so beings saved before the fix don't keep `/call_for_human...` until reopened.
-- **Covered by:** check 9 (three checks).
+- **Fix (commits 7, 8):** commit 7 titled a being from the human's first message, showing the short
+  id until there was one. On dev2 that read as a rename: an unnamed being labelled `b_xxxxxxxx`
+  turned into "what are you gu…" when the user switched away mid-turn, because the switch was the
+  first save after the message (the menu refreshes on each save). Commit 8 drops titles: the label is
+  the being's own `name`, else `b_xxxxxxxx`, so it changes only when the being names itself. Old
+  records' `title` is ignored, and dropped at their next save.
+- **Covered by:** check 9 (four checks).
 
 ### Observation (not a bug): two beings picking the same name
 
@@ -201,7 +203,8 @@ in different tabs still run at the same time, since each tab is a separate page.
 | 4 `fix: hand the being to the remote host after a switch reload` | An empty sync from an idle host hands the current being over. | 6 |
 | 5 `fix: merge concurrent settings saves across tabs` | Saves are a 3-way merge: write only what this tab changed since it last read storage onto the current stored copy. | 7 (partly) |
 | 6 `fix: same-tab switch refused as "open in another tab"; stale-read-safe device merge` | Release the being's lock before navigating; reload a page restored from the back/forward cache. Devices merge as a union with removal markers, and a tab re-publishes a device another tab's stale save dropped. | 7, 8 |
-| 7 `fix: label unnamed beings by the human's first message` | `saveBeing()` titles a being from the human's first message, or leaves the title empty so the picker shows the short id; the picker skips old titles that are the id or start with `/`. | 9 |
+| 7 `fix: label unnamed beings by the human's first message` | `saveBeing()` titles a being from the human's first message, or leaves the title empty so the picker shows the short id; the picker skips old titles that are the id or start with `/`. | 9 (partly) |
+| 8 `fix: label a being by its own name or short id only` | The picker shows the being's `name`, else `b_xxxxxxxx`; `saveBeing()` no longer writes a title. Typing never changes a label. | 9 |
 
 Trade-offs:
 
@@ -265,7 +268,8 @@ Playwright call, so routed requests stall during `time.sleep()`. It polls on a t
 | 5 | From B, list keys under `<A>/`; write `<A>/probe` | B can neither read nor write A's records (known failure) |
 | 8 | In one tab switch A → B, then pick A once (no retry) | tab is on A, no "open in another tab" notice |
 | 9 | Right after setup, before any input, read the picker labels of A and B | labels differ |
-| 9 | New being C finishes its first turn; send `TASK-LABEL9 hello` | C's label is `TASK-LABEL9 hel...` |
+| 9 | New being C finishes its first turn; send `TASK-LABEL9 hello` | C's label stays `b_<C's id8>` |
+| 9 | C writes `name: 'Lumen'` to its record; save | C's label is `Lumen` |
 | 9 | Store a record with a hex id and title `/call_for_human...` | its label is `b_01234567` |
 
 ### Remote-host test (bug 6)
@@ -291,12 +295,14 @@ script (see Further testing).
 
 ## Results
 
-### Latest (2026-10-12, after commit 7)
+### Latest (2026-10-12, after commit 8)
 
 | Run | Result |
 |---|---|
-| Main test, Chromium, Firefox and WebKit | 14/16 passed each, 2 known (5 read, 5 write), 0 failures, exit 0 |
-| Main test on `16df906` (before commit 7) | all three check-9 checks FAIL: labels `/call_for_human...` for A and B, for C before and after typing, and for the old record |
+| Main test, Chromium, Firefox and WebKit | 15/17 passed each, 2 known (5 read, 5 write), 0 failures, exit 0 |
+| Main test on `f238c24` (commit 7) | 16/17: "typing doesn't change its label" FAILS (`b_02f092bb` → `TASK-LABEL9 hel...`) |
+| Main test on `16df906` (before commit 7) | check 9 fails: A and B both `/call_for_human...` |
+| `regression_e2e.py` | 24/24 |
 
 ### After commit 6 (2026-10-11)
 

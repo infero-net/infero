@@ -322,9 +322,9 @@ def main():
             check(5, "B cannot write A's records", not wrote, f"B wrote {A[:8]}…/probe={wrote}")
 
             print("\n[9] Labels of beings that haven't named themselves")
-            # Bug: the title was the first non-system paragraph of the consciousness. A fresh being's
-            # auto first turn ends with '/call_for_human', so every unnamed being was labelled
-            # '/call_for_human...', and the human's messages never changed it.
+            # Bug: the label was a title taken from the chat. A fresh being's auto first turn ends with
+            # '/call_for_human', so every unnamed being was labelled '/call_for_human...'. The label is
+            # now the being's own name, else its short id; nothing typed in the chat changes it.
             check(9, "two fresh beings get different labels in the being picker", labels["A"] != labels["B"],
                   f"A={labels['A']!r}, B={labels['B']!r}")
             label_of = lambda bid: pg.evaluate("async id => { await loadBeingsList();"
@@ -334,8 +334,12 @@ def main():
             before = label_of(C)
             pg.evaluate("() => trigger('TASK-LABEL9 hello', 0)"); time.sleep(1); settle(pg)
             after = label_of(C)
-            check(9, "the human's first message becomes the label", after == "TASK-LABEL9 hel...",
+            check(9, "typing to an unnamed being doesn't change its label", after == before == "b_" + C[:8],
                   f"before typing={before!r}, after={after!r}")
+            pg.evaluate("async id => { const r = await DB.get(id); await DB.put({...r, name: 'Lumen'}); }", C)
+            pg.evaluate("() => saveBeing()"); time.sleep(0.3)
+            check(9, "a being's own name becomes its label and survives a save", label_of(C) == "Lumen",
+                  f"label={label_of(C)!r}")
             legacy = "0123456789abcdef" * 4
             pg.evaluate("id => DB.put({id, name: '', title: '/call_for_human...', updatedAt: 1})", legacy)
             old_label = label_of(legacy)
