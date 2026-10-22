@@ -91,6 +91,8 @@ window.MODELS = {
       "moonshot": "kimi-k3", "openrouter": "moonshotai/kimi-k3" , "nanogpt": "moonshotai/kimi-k3"}},
     { "name": "kimi-k2.5", "format": "openai", "maxContext": 256000, "vision": true, "from": {
       "moonshot": "kimi-k2.5", "openrouter": "moonshotai/kimi-k2.5", "dashscope": "kimi-k2.5" , "nanogpt": "moonshotai/kimi-k2.5"}},
+    { "name": "MiniMax-M3.1-flash", "format": "openai", "maxContext": 256000, "vision": false, "from": {
+      "minimax": "MiniMax-M3.1-flash", "openrouter": "minimax/minimax-m3.1-flash" , "nanogpt": "minimax/minimax-m3.1-flash"}},
     { "name": "MiniMax-M3", "format": "openai", "maxContext": 256000, "vision": false, "from": {
       "minimax": "MiniMax-M3", "openrouter": "minimax/minimax-m3" , "nanogpt": "minimax/minimax-m3"}},
     { "name": "MiniMax-M2.5", "format": "openai", "maxContext": 256000, "vision": false, "from": {
