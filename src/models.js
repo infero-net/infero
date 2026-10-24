@@ -87,6 +87,8 @@ window.MODELS = {
       "dashscope": "glm-5.1", "openrouter": "z-ai/glm-5.1" , "nanogpt": "z-ai/glm-5.1"}},
     { "name": "glm-5.2", "format": "openai", "maxContext": 131072, "vision": false, "from": {
       "zhipu": "glm-5.2", "dashscope": "glm-5.2", "openrouter": "z-ai/glm-5.2" , "nanogpt": "z-ai/glm-5.2"}},
+    { "name": "kimi-k3.1-pro", "format": "openai", "maxContext": 256000, "vision": true, "from": {
+      "moonshot": "kimi-k3.1-pro", "openrouter": "moonshotai/kimi-k3.1-pro" , "nanogpt": "moonshotai/kimi-k3.1-pro"}},
     { "name": "kimi-k3", "format": "openai", "maxContext": 256000, "vision": true, "from": {
       "moonshot": "kimi-k3", "openrouter": "moonshotai/kimi-k3" , "nanogpt": "moonshotai/kimi-k3"}},
     { "name": "kimi-k2.5", "format": "openai", "maxContext": 256000, "vision": true, "from": {
