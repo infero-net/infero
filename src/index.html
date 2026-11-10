@@ -67,12 +67,13 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const cont = lastCFH === -1 || !!currentUserInput;
                 console.log(`[loop] lastCFH=${lastCFH} currentUserInput=${!!currentUserInput} cont=${cont} → ${cont ? 'continue' : 'stop(CFT)'}`);
                 if (cont) {
-                    currentAbortController = new AbortController();
+                    // Stop aborts and then nulls currentAbortController, so check our own reference
+                    const ctl = currentAbortController = new AbortController();
                     await new Promise(r => {
                         const t = setTimeout(r, 1000);
-                        currentAbortController.signal.addEventListener('abort', () => { clearTimeout(t); r(); });
+                        ctl.signal.addEventListener('abort', () => { clearTimeout(t); r(); });
                     });
-                    if (currentAbortController?.signal.aborted) return;
+                    if (ctl.signal.aborted) return;
                     return loop();
                 }
             } catch (e) {
@@ -86,12 +87,12 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const errMsg = `System - [${label}] ${e.message}`;
                 appendMsgUI('system', errMsg);
                 await appendConsciousness(errMsg + '\n\n');
-                currentAbortController = new AbortController();
+                const ctl = currentAbortController = new AbortController();
                 await new Promise(r => {
                     const t = setTimeout(r, 15000);
-                    currentAbortController.signal.addEventListener('abort', () => { clearTimeout(t); r(); });
+                    ctl.signal.addEventListener('abort', () => { clearTimeout(t); r(); });
                 });
-                if (currentAbortController?.signal.aborted) return;  // user aborted during wait
+                if (ctl.signal.aborted) return;  // user aborted during wait
                 return loop();
             }
         }
@@ -1432,7 +1433,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             </div>
             <div id="device-list" style="padding:2px 0 4px 0;min-height:4px;"></div>
             <div class="settings-row" style="border-top:1px solid var(--border);padding-top:8px;justify-content:flex-end">
-                <span style="color:var(--red);cursor:pointer;font-size:0.6rem;letter-spacing:0.5px;text-transform:uppercase" onclick="if(confirm('Delete all data? This cannot be undone.')){const devs=settings.devices||{};if(_relayWs&&_relayConnected){Object.keys(devs).forEach(n=>_relayWs.send(JSON.stringify({type:'device_remove',device_name:n})));}indexedDB.deleteDatabase('GenesisDB');localStorage.clear();location.reload();}">Reset all data</span>
+                <span style="color:var(--red);cursor:pointer;font-size:0.6rem;letter-spacing:0.5px;text-transform:uppercase" onclick="resetAllData()">Reset all data</span>
             </div>
         </div>
     </div>
@@ -1596,6 +1597,11 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
         function getActiveToken() {
             return settings.tokens?.[settings.provider] || INFERO_KEY;
         }
+        // What a device host (agent.py) needs to know about the model; sent with loop_handoff and settings_update
+        function agentModelSettings() {
+            const m = MODEL_LIST[settings.model];
+            return { thinking_mode: m?.thinkingMode || null, compressCfg: m?.compress || null, maxContext: m?.maxContext || 0, stop: m?.stop !== false };
+        }
 
         // --- IndexedDB Storage Engine (metadata only) ---
         const DB = {
@@ -1654,6 +1660,36 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
             }
         };
         window.DB = DB;
+
+        // "Reset all data". deleteDatabase stays blocked while connections are open (DB.open() and skill
+        // code open their own and never close them); Chromium and Firefox finish it across the reload,
+        // WebKit doesn't. So clear every store first, then delete, and reload only once that has settled.
+        let _resetting = false;
+        async function resetAllData() {
+            if (!confirm('Delete all data? This cannot be undone.')) return;
+            _resetting = true;
+            if (_saveBeingTimer) { clearTimeout(_saveBeingTimer); _saveBeingTimer = null; }  // a save now would bring data back
+            const devs = settings.devices || {};
+            if (_relayWs && _relayConnected) Object.keys(devs).forEach(n => _relayWs.send(JSON.stringify({ type: 'device_remove', device_name: n })));
+            try {
+                const db = await DB.open();
+                const stores = [...db.objectStoreNames];
+                if (stores.length) await new Promise((res, rej) => {
+                    const tx = db.transaction(stores, 'readwrite');
+                    stores.forEach(n => tx.objectStore(n).clear());
+                    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+                });
+                db.close();
+            } catch (e) { console.warn('[reset] clearing stores failed', e); }
+            _flushDb?.close(); _flushDb = null;
+            await new Promise(r => {
+                const req = indexedDB.deleteDatabase('GenesisDB');
+                req.onsuccess = req.onerror = req.onblocked = () => r();
+                setTimeout(r, 1000);
+            });
+            localStorage.clear();
+            location.reload();
+        }
 
         // skill.code can be a string (treated as JS for browser) or { js, shell, python, ... }; pick the JS variant
         function skillJsCode(c) {
@@ -2262,6 +2298,27 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 saveBeing();
             }, 3000);
         }
+
+        // A pending save (scheduleSaveBeing waits 3 s) is written when the page is closed or reloaded.
+        // It has to be synchronous: a transaction on an already open connection, started while unloading,
+        // still commits; awaiting DB.open() or saveBeing() there is too late. A hidden tab is still
+        // alive, so it gets the full saveBeing().
+        let _flushDb = null;
+        DB.open().then(db => { _flushDb = db; db.onversionchange = () => { db.close(); _flushDb = null; }; }).catch(() => {});
+        function flushPendingSave() {
+            if (!_saveBeingTimer || !_flushDb || !currentBeingId || _resetting) return;
+            clearTimeout(_saveBeingTimer); _saveBeingTimer = null;
+            try {
+                // Content only, committed at once (no read-then-write): the metadata record follows on the next save
+                const tx = _flushDb.transaction('beings', 'readwrite'), store = tx.objectStore('beings');
+                store.put({ id: `${currentBeingId}/consciousness.txt`, value: consciousness });
+                store.put({ id: `${currentBeingId}/snapshot`, htmlContent: document.getElementById('html-div').innerHTML });
+                tx.commit?.();
+            } catch (e) { console.warn('[save] flush on unload failed', e); }
+        }
+        window.addEventListener('beforeunload', flushPendingSave);  // WebKit drops a transaction started in pagehide
+        window.addEventListener('pagehide', flushPendingSave);
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && _saveBeingTimer && !_resetting) saveBeing(); });
 
         async function saveBeing() {
             if (_saveBeingTimer) { clearTimeout(_saveBeingTimer); _saveBeingTimer = null; }
@@ -2934,9 +2991,8 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     token: getActiveToken(),
                     format: getActiveFormat(),
                     thinking: settings.thinking || false,
-                    thinking_mode: MODEL_LIST[settings.model]?.thinkingMode || null,
                     endpoint: getActiveEndpoint(),
-                    compressCfg: MODEL_LIST[settings.model]?.compress || null,
+                    ...agentModelSettings(),
                     system_prompt: SYSTEM_INSTRUCTION,
                     client_id: CLIENT_ID
                 }
@@ -3408,7 +3464,10 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                 // Announce only real transitions: relay-WS reconnects silently reset .online=false,
                 // so compare against the last *announced* status, not the reset value.
                 if (!window._devAnnounced) window._devAnnounced = {};
-                if (settings.devices[device_name] && window._devAnnounced[device_name] !== online) {
+                if (_wasDeleted) {
+                    delete window._devAnnounced[device_name];  // already gone from settings.devices
+                    appendMsgUI('system', note);
+                } else if (settings.devices[device_name] && window._devAnnounced[device_name] !== online) {
                     window._devAnnounced[device_name] = online;
                     appendMsgUI('system', note);
                 }
@@ -4093,9 +4152,8 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     token: settings.tokens?.[settings.provider] || INFERO_KEY,
                     format: getActiveFormat(),
                     thinking: settings.thinking || false,
-                    thinking_mode: MODEL_LIST[settings.model]?.thinkingMode || null,
                     endpoint: getActiveEndpoint(),
-                    compressCfg: MODEL_LIST[settings.model]?.compress || null,
+                    ...agentModelSettings(),
                     cache_endpoint: PROVIDERS[settings.provider]?.cacheEndpoint || null,
                     system_prompt: SYSTEM_INSTRUCTION,
                     client_id: CLIENT_ID
@@ -4191,6 +4249,7 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
                     select.appendChild(opt);
                 });
             }
+            PROVIDERS.custom.cacheEndpoint = settings.customCacheEndpoint || null;  // also set by applySettings
             // Validate saved model against loaded list
             if (settings.model !== 'custom' && !MODEL_LIST[settings.model]) {
                 settings.model = SETTINGS_DEFAULTS.model;
@@ -4287,7 +4346,9 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             try {
                 const safe = (file.name || 'pasted.png').replace(/[^\w.-]/g, '_');
                 const key = `${currentBeingId}/uploads/${Date.now()}_${safe}`;
-                await DB.put({ id: key, value: file });
+                // A data URL, not the File: WebKit can't store a File/Blob in ephemeral (private) storage
+                const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(file); });
+                await DB.put({ id: key, value: dataUrl });
                 input.value += (input.value && !input.value.endsWith('\n') ? '\n' : '') + `/view ${key}\n`;
                 input.focus();
                 updateSendBtn();

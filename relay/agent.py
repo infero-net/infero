@@ -401,9 +401,8 @@ class GenesisWorker:
             # Check tail after last code block for stop/continue signals
             last_fence = B.rfind('\n```\n')
             tail = B[last_fence:] if last_fence != -1 else B
-            last_sc = 1 if '/self_continue' in tail else -1
             last_cfh = 1 if any(s in tail for s in ('/call_for_human', '/call_for_trigger')) else -1
-            cont = last_cfh == -1 or last_sc != -1 or bool(self.pending_user_input)
+            cont = last_cfh == -1 or bool(self.pending_user_input)  # a stop signal wins over /self_continue, as in the browser
             if not cont:
                 break
 
@@ -624,9 +623,10 @@ class GenesisWorker:
                                     u = data.get('usage', {})
                                     if u: usage['outputTokens'] = u.get('output_tokens', 0)
                             elif fmt == 'openai':
-                                delta = data.get('choices', [{}])[0].get('delta', {})
+                                delta = ((data.get('choices') or [{}])[0] or {}).get('delta') or {}  # usage chunk: "choices": []
                                 if delta.get('content'): ai_text += delta['content']
                                 if delta.get('reasoning_content'): thinking_text += delta['reasoning_content']
+                                if delta.get('reasoning'): thinking_text += delta['reasoning']
                                 if data.get('usage'):
                                     usage = {'promptTokens': data['usage'].get('prompt_tokens', 0), 'outputTokens': data['usage'].get('completion_tokens', 0)}
                             else:  # gemini
@@ -668,7 +668,8 @@ class GenesisWorker:
         self.metadata['cachedTokens'] = usage.get('cachedTokens', 0)
         await self._maybe_refresh_cache(usage)
         time_str = datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S UTC%z')
-        clean_ai = re.sub(r'^\*{0,2}Digital Being\s*[-–—]\s*\[.*?\]\*{0,2}\n?', '', ai_text)
+        clean_ai = re.sub(r'^\*{0,2}[A-Za-z][\w\s]{0,29}\*{0,2}\s*[-–—]\s*\[[^\]\n]*\d[^\]\n]*\]\*{0,2}\n?', '', ai_text)
+        clean_ai = re.sub(r'\n\*{0,2}Digital Being\b[^\n]*$', '', clean_ai)
         self.consciousness += f"**Digital Being - [{time_str}]**\n{clean_ai}\n\n"
         return ai_text
 
@@ -684,7 +685,8 @@ class GenesisWorker:
     def _maybe_compress_consciousness(self):
         # Mirror of src/index.html maybeCompressConsciousness; storage is filesystem here.
         cfg = (self.llm_settings or {}).get('compressCfg') or {}
-        limit_tokens = cfg.get('at', 300000)
+        model_max = (self.llm_settings or {}).get('maxContext') or 0
+        limit_tokens = cfg.get('at', model_max * 2 // 3 if model_max else 300000)
         head_frac = cfg.get('head', 0.1)
         tail_frac = cfg.get('tail', 0.7)
         MIN_TAIL_FRAC = 0.3
@@ -845,7 +847,25 @@ class GenesisWorker:
             if not v or v.get('enable') is not True: continue
             instruction = v.get('instruction') or ''
             if not instruction: continue
-            out.append({'name': v.get('id') or fn[:-5], 'instruction': instruction})
+            out.append({'name': v.get('id') or fn[:-5], 'instruction': instruction,
+                        'code': v.get('code'), 'code_readme': v.get('code_readme')})
+        return out
+
+    def _read_disabled_skills(self):
+        """Names of the being's skills that are not enabled (listed in the stable head, like the browser)."""
+        skill_dir = os.path.join(INFERO_DIR, 'beings', self.being_id or '', 'skill')
+        if not self.being_id or not os.path.isdir(skill_dir):
+            return []
+        out = []
+        for fn in sorted(os.listdir(skill_dir)):
+            if not fn.endswith('.json'): continue
+            try:
+                with open(os.path.join(skill_dir, fn), 'r', encoding='utf-8') as f:
+                    v = json.load(f)
+            except Exception:
+                continue
+            if v and v.get('enable') is not True:
+                out.append(v.get('id') or fn[:-5])
         return out
 
     _HEADER_RE = re.compile(r'\*{0,2}[A-Za-z][\w\s]{0,29}\*{0,2}\s*[-–—]\s*\[[^\]\n]*\d[^\]\n]*\]\*{0,2}\n')
@@ -867,12 +887,19 @@ class GenesisWorker:
             skills_text = f"=== SKILLS (filesystem: {skill_dir}/<name>.json; mirrored from browser IndexedDB key '{self.being_id}/skill/<name>') ===\n"
             for s in skills:
                 skills_text += f"\n### Skill: {s['name']}\n{s['instruction']}\n"
+                readme = s.get('code_readme')
+                if s.get('code') and isinstance(readme, str) and readme:
+                    skills_text += f"\n_call_ (code_readme):\n{readme}\n"
+            disabled = self._read_disabled_skills()
+            if disabled:
+                overflow = f" (+{len(disabled) - 50} more — list truncated)" if len(disabled) > 50 else ""
+                skills_text += f"\n[Disabled (local, not loaded): {', '.join(disabled[:50])}{overflow} — flip enable=true to activate]\n"
             skills_text += "\n[Note] skills are descriptions; `code` may be a string (single-runtime) or `{js, shell, python}` (per-runtime). On this host (server, agent.py) only `shell` is auto-eval'd at boot. Rewrite as needed. See skill `skills_mechanism`.\n===================\n\n"
         stable_head = core_mem_text + skills_text
         being_prefix = f"**Digital Being - [{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S UTC%z')}]**\n"
         volatile_tail = (realtime + '\n\n' if realtime else '') + being_prefix
         history_text = self.consciousness
-        stop = ['\nSystem - [', '\n[System Environment]']
+        stop = ['\nSystem - [', '\n[System Environment]', '\n**Digital Being']
 
         if fmt == 'anthropic':
             # Rolling-history segmentation:
@@ -946,16 +973,30 @@ class GenesisWorker:
                 else:
                     oa_content.append({'type': 'image_url', 'image_url': {'url': f"data:{b['media_type']};base64,{b['data']}"}})
             oa_content.append({'type': 'text', 'text': '\n\n' + volatile_tail})
-            return {
+            adaptive = self.llm_settings.get('thinking_mode') == 'adaptive'
+            payload = {
                 'model': model,
                 'messages': [
                     {'role': 'system', 'content': system_prompt},
                     {'role': 'user', 'content': oa_content}
                 ],
                 'stream': True,
-                'temperature': 1 if thinking else 0.7,
-                'stop': stop
             }
+            if not adaptive:
+                payload['temperature'] = 0.7
+            if self.llm_settings.get('stop') is not False:  # models.js stop:false → the provider rejects `stop`
+                payload['stop'] = stop
+            if thinking:
+                if adaptive:
+                    payload['thinking'] = {'type': 'adaptive', 'display': 'summarized'}
+                    payload['output_config'] = {'effort': 'high'}
+                else:
+                    payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
+                    payload['reasoning'] = {'max_tokens': 8000}
+                    payload['temperature'] = 1
+            elif self.llm_settings.get('provider') == 'deepseek':
+                payload['thinking'] = {'type': 'disabled'}
+            return payload
 
         # gemini — when cache exists, server prepends stableHead + consciousness[0..cachedLength].
         # We only send the delta: new consciousness chars + volatile_tail.

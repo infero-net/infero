@@ -1,0 +1,9 @@
+/* esm.sh - @scure/bip32@1.7.0 */
+import "/@noble/curves@~1.9.0/abstract/modular?target=es2022";
+import "/@noble/curves@~1.9.0/secp256k1?target=es2022";
+import "/@noble/hashes@~1.8.0/hmac?target=es2022";
+import "/@noble/hashes@~1.8.0/legacy?target=es2022";
+import "/@noble/hashes@~1.8.0/sha2?target=es2022";
+import "/@noble/hashes@~1.8.0/utils?target=es2022";
+import "/@scure/base@~1.2.5?target=es2022";
+export * from "/@scure/bip32@1.7.0/es2022/bip32.mjs";

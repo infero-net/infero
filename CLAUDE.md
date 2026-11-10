@@ -35,7 +35,7 @@ Genesis (Infero) v0.1 — a local-first digital life engine. Split-screen web ap
 
 - **`src/index.html`** — The entire frontend: UI, state management, IndexedDB storage, SSE streaming, JS execution, and the system prompt. All in one self-contained SPA.
 - **`src/models.js`** — Model and provider configuration (`window.MODELS = {...}`), loaded as a `<script>` (served from `src/`).
-- **`src/i18n.json`** — UI string translations (zh/en).
+- **`src/i18n.js`** — translations (`window.I18N`: zh, ja, en), loaded as a `<script>`.
 
 **Data flow:** Browser → LLM API (SSE) → streamed back to browser. Provider/endpoint configurable in settings (Gemini, OpenAI, Anthropic, DeepSeek, OpenRouter, custom).
 
@@ -44,7 +44,7 @@ Genesis (Infero) v0.1 — a local-first digital life engine. Split-screen web ap
 **Core loop (BIS architecture):**
 - `perceive()` — formats environment context + user input
 - `infer()` — calls LLM, streams response, extracts `/browser exec` code blocks
-- `act(B)` — executes extracted JS, writes result to consciousness (15s timeout)
+- `act(B)` — executes extracted JS, writes result to consciousness (after 30s the loop moves on; the code keeps running)
 - `loop()` — orchestrates the cycle; continues on `/self_continue`, stops on `/call_for_human`
 
 **Device Relay (`relay/relay.py`):**
@@ -68,9 +68,13 @@ See **`DEPLOY.md`** (gitignored, local only) for full deployment commands, servi
 
 Also works from GitHub Pages, Vercel, or local `file://` (no device relay needed).
 
+## Tests
+
+Offline regression suite: `src/tests/regression/` (`python3 src/tests/regression/run.py`; README there). Run it before merging; `--src` + `compare.py` check another branch against `dev`. Known bugs are listed in `src/tests/regression/BUGS.md`.
+
 ## Symmetric Logic (keep in sync manually)
 
-`src/index.html` (JS) and `relay/agent.py` (Python) both implement the same core loop, encryption, exec-block parsing, and LLM payload construction. **Any logic change in one file likely needs to be mirrored in the other.** Always check both when modifying shared behaviour.
+`src/index.html` (JS) and `relay/agent.py` (Python) both implement the same core loop, encryption, exec-block parsing, and LLM payload construction. **Any logic change in one file likely needs to be mirrored in the other.** Always check both when modifying shared behaviour. `src/tests/regression/test_match_agent.py` feeds both the same input and compares; current differences are DRIFT-n in `BUGS.md`.
 
 ## Key Conventions
 
@@ -79,7 +83,7 @@ Also works from GitHub Pages, Vercel, or local `file://` (no device relay needed
 - AI output must end with `/call_for_human` or `/self_continue` — this drives the autonomous execution loop.
 - The system prompt is defined inline in `SYSTEM_INSTRUCTION` at the top of `src/index.html`.
 - Settings (model, provider, token, vision mode) stored in `localStorage.genesis_settings`.
-- Context compression triggers at 300k tokens, saves trimmed middle to IndexedDB.
-- Anthropic cache uses up to 4 floor-aligned breakpoints in the user content array (stable cache positions).
+- Context compression triggers at the model's `compress.at` in `models.js`, else 2/3 of its `maxContext`, else 300k tokens; saves the trimmed middle to IndexedDB.
+- Anthropic cache uses 2 breakpoints in the user content array: the stable head and the latest turn (rolling history).
 - `agent.py` is loaded once at relay startup — changes require relay restart to take effect.
-- **`src/index.html` must contain no Chinese text.** All UI strings, comments, default-skill instructions, and any inline prose must be English. Translations live in `src/i18n.json`.
+- **`src/index.html` must contain no Chinese text.** All UI strings, comments, default-skill instructions, and any inline prose must be English. Translations live in `src/i18n.js`.
