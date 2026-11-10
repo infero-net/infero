@@ -37,6 +37,8 @@ window.MODELS = {
       "openai": "gpt-5.4-mini", "openrouter": "openai/gpt-5.4-mini" , "nanogpt": "openai/gpt-5.4-mini"}},
     { "name": "gpt-5.4-nano", "format": "openai", "stop": false, "from": {
       "openai": "gpt-5.4-nano", "openrouter": "openai/gpt-5.4-nano" , "nanogpt": "openai/gpt-5.4-nano"}},
+    { "name": "claude-fable-5.2", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
+      "infero": "claude-fable-5-2", "anthropic": "claude-fable-5-2", "openrouter": "anthropic/claude-fable-5.2" , "nanogpt": "anthropic/claude-fable-5.2"}},
     { "name": "claude-fable-5.1", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
       "anthropic": "claude-fable-5-1", "openrouter": "anthropic/claude-fable-5.1" , "nanogpt": "anthropic/claude-fable-5.1"}},
     { "name": "claude-fable-5", "format": "anthropic", "maxContext": 1000000, "compress": { "at": 128000, "head": 0.1, "tail": 0.6 }, "thinkingMode": "adaptive", "from": {
