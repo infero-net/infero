@@ -1,0 +1,2 @@
+/* esm.sh - @scure/base@1.2.6 */
+export * from "/@scure/base@1.2.6/es2022/base.mjs";

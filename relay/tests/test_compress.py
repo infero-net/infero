@@ -8,34 +8,20 @@ Mirrors src/index.html maybeCompressConsciousness:
 
 Run: python3 -m pytest relay/tests/test_compress.py -v
 """
-import importlib.util
 import os
 import re
 import shutil
 import sys
 import tempfile
-import types
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def _load_agent(infero_dir):
-    sys.modules.setdefault('aiohttp', types.SimpleNamespace())
-    os.environ['INFERO_DIR'] = infero_dir
-    spec = importlib.util.spec_from_file_location('agent_under_test', os.path.join(ROOT, 'relay', 'agent.py'))
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        pass
-    return mod
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from agent_loader import load_agent  # noqa: E402
 
 
 def _make_worker(infero_dir, consciousness, prompt_tokens, being_id='test_being'):
-    mod = _load_agent(infero_dir)
-    GW = next(getattr(mod, n) for n in dir(mod) if isinstance(getattr(mod, n), type) and 'Worker' in n)
-    w = GW.__new__(GW)
+    mod = load_agent(infero_dir)
+    w = mod.GenesisWorker.__new__(mod.GenesisWorker)
     w.being_id = being_id
     w.consciousness = consciousness
     w.metadata = {'cacheName': 'caches/old', 'cachedLength': 1000}
@@ -145,9 +131,7 @@ class TestCompress(unittest.TestCase):
     def test_bridge_regex_ignores_incidental_marker_mentions(self):
         # Test the regex directly: incidental delimiter mentions in chat (without a real
         # [gap ...] line between them) must not match. Only real bridge blocks should strip.
-        mod = _load_agent(self.tmp)
-        GW = next(getattr(mod, n) for n in dir(mod) if isinstance(getattr(mod, n), type) and 'Worker' in n)
-        rx = GW._BRIDGE_RE
+        rx = load_agent(self.tmp).GenesisWorker._BRIDGE_RE
 
         incidental = (
             'Some chat about === bridge:start === and === bridge:end ===.\n'

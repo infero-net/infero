@@ -1,0 +1,8 @@
+/* esm.sh - @noble/curves@1.9.7/_shortw_utils */
+import{weierstrass as o}from"./abstract/weierstrass.mjs";function a(r){return{hash:r}}function c(r,t){let e=n=>o({...r,hash:n});return{...e(t),create:e}}export{c as createCurve,a as getHash};
+/*! Bundled license information:
+
+@noble/curves/esm/_shortw_utils.js:
+  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
+*/
+//# sourceMappingURL=_shortw_utils.mjs.map

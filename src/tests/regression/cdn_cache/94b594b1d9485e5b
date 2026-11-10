@@ -1,0 +1,8 @@
+/* esm.sh - @scure/bip39@1.5.0 */
+import "/@noble/hashes@~1.6.0/_assert?target=es2022";
+import "/@noble/hashes@~1.6.0/pbkdf2?target=es2022";
+import "/@noble/hashes@~1.6.0/sha256?target=es2022";
+import "/@noble/hashes@~1.6.0/sha512?target=es2022";
+import "/@noble/hashes@~1.6.0/utils?target=es2022";
+import "/@scure/base@~1.2.1?target=es2022";
+export * from "/@scure/bip39@1.5.0/es2022/bip39.mjs";
