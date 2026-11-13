@@ -155,21 +155,53 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
 
                 // Wait-for-headers timeout (does not bound the streaming phase)
                 const HEADERS_TIMEOUT_MS = 90000;
-                let timedOut = false;
-                const timeoutId = setTimeout(() => { timedOut = true; currentAbortController.abort(); }, HEADERS_TIMEOUT_MS);
+                // Mobile browsers cut a backgrounded tab's network (Android: ~1 min after
+                // hidden) and the in-flight fetch then hangs silently. Since the request body
+                // is several hundred KB, a hidden tab mid-upload never recovers on its own.
+                // Back from hidden with no response yet → abort and resend at once (nothing
+                // generated is lost: the server hasn't answered). While streaming, a watchdog
+                // resets a connection that stays silent (20s after coming back, else 120s).
+                const STREAM_IDLE_MS = 120000, STREAM_IDLE_AFTER_BG_MS = 20000, BG_MIN_HIDDEN_MS = 5000;
+                const ctl = currentAbortController;
+                let timedOut = false, bgDropped = false, idleDropped = false, gotHeaders = false;
+                let hiddenAt = document.visibilityState === 'hidden' ? Date.now() : 0;
+                let lastByteAt = Date.now(), visibleAgainAt = 0;
+                const onVis = () => {
+                    if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+                    const away = hiddenAt ? Date.now() - hiddenAt : 0;
+                    hiddenAt = 0;
+                    if (away < BG_MIN_HIDDEN_MS && !timeoutPending) return;
+                    if (!gotHeaders) { bgDropped = true; ctl.abort(); }
+                    else visibleAgainAt = Date.now();
+                };
+                document.addEventListener('visibilitychange', onVis);
+                const watchdog = setInterval(() => {
+                    if (!gotHeaders || document.visibilityState === 'hidden') return;
+                    const now = Date.now();
+                    const silentFor = now - lastByteAt;
+                    if (silentFor > STREAM_IDLE_MS || (visibleAgainAt > lastByteAt && now - visibleAgainAt > STREAM_IDLE_AFTER_BG_MS)) {
+                        idleDropped = true; ctl.abort();
+                    }
+                }, 2000);
+                const cleanup = () => { clearInterval(watchdog); document.removeEventListener('visibilitychange', onVis); };
+                let timeoutPending = false;
+                const timeoutId = setTimeout(() => { if (document.visibilityState === 'hidden') { timeoutPending = true; return; } timedOut = true; ctl.abort(); }, HEADERS_TIMEOUT_MS);
                 let streamStarted = false;
                 let response;
                 try {
                     response = await fetch(getActiveEndpoint(), { method: 'POST', headers, body, signal: abortSignal });
                 } catch (e) {
-                    clearTimeout(timeoutId);
+                    clearTimeout(timeoutId); cleanup();
+                    if (bgDropped) { const err = new Error('Connection dropped while the tab was in background, resending'); err._kind = 'background'; throw err; }
                     if (timedOut) { const err = new Error(`No response in ${HEADERS_TIMEOUT_MS / 1000}s`); err._kind = 'timeout'; throw err; }
                     if (e.name === 'AbortError') throw e;
                     if (e.name === 'TypeError') { e._kind = 'unreachable'; }
                     throw e;
                 }
                 clearTimeout(timeoutId);
+                gotHeaders = true; lastByteAt = Date.now();
                 if (!response.ok) {
+                    cleanup();
                     const err = new Error(`HTTP ${response.status}: ${await response.text()}`);
                     err._kind = 'http';
                     err._status = response.status;
@@ -180,17 +212,21 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const decoder = new TextDecoder("utf-8");
                 let aiText = "", thinkingText = "", buffer = "";
 
+                try {
                 while (true) {
                     let chunk;
                     try {
                         chunk = await reader.read();
                     } catch (e) {
+                        cleanup();
+                        if (idleDropped) { const err = new Error('Stream went silent, connection reset'); err._kind = 'reset'; throw err; }
                         if (e.name === 'TypeError') { e._kind = streamStarted ? 'reset' : 'unreachable'; }
                         throw e;
                     }
                     const { done, value } = chunk;
-                    if (done) break;
+                    if (done) { cleanup(); break; }
                     streamStarted = true;
+                    lastByteAt = Date.now();
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split('\n');
                     buffer = lines.pop();
@@ -248,6 +284,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                         }
                     }
                 }
+                } finally { cleanup(); }
                 // Signal stream done
                 relayEncBroadcast('stream_token', { text: aiText, thinking: thinkingText, done: true, being_id: currentBeingId });
                 window._lastStreamAi = 0;
@@ -270,6 +307,14 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                         setStatus('Inferring...');
                         aiDiv = appendMsgUI('ai', '');
                         continue;  // retry down the chain (multi-hop)
+                    } else if (e._kind === 'background') {
+                        // Nothing was generated yet; resend without writing an error into consciousness
+                        console.log('[infer] ' + e.message);
+                        aiDiv.remove();
+                        appendMsgUI('system', 'System - [Reconnect] ' + e.message);
+                        setStatus('Inferring...');
+                        aiDiv = appendMsgUI('ai', '');
+                        continue;
                     } else if (cacheName && e.message.includes('CachedContent')) {
                         aiDiv.remove();
                         appendMsgUI('system', 'Cache expired, rebuilding...');
@@ -395,7 +440,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const toAnthropic = b => b.text !== undefined
                     ? { type: 'text', text: b.text }
                     : { type: 'image', source: { type: 'base64', media_type: b.media_type, data: b.data } };
-                for (const b of await _mmBlocks(history)) userContent.push(toAnthropic(b));
+                for (const b of await _mmBlocks(history, IMG_SEND_MAX_HISTORY)) userContent.push(toAnthropic(b));
                 const latestBlocks = await _mmBlocks(latest);
                 latestBlocks.forEach((b, i) => {
                     const blk = toAnthropic(b);
@@ -596,7 +641,37 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
 
         const IMG_MARKER_RE = /<<<IMAGE:([^>\n]+)>>>/g;
 
-        async function _mmBlocks(text) {
+        // Upload budget: every cycle re-sends all images in context. Full-size PNGs
+        // (~850KB base64 each) made a phone's request body ~4MB, and the upload alone
+        // took up to 30s on LTE. Models downsample to ~1568px anyway; older images get
+        // 768px. Memoized per key+size so bytes stay identical across cycles (prompt cache).
+        const IMG_SEND_MAX_LATEST = 1568, IMG_SEND_MAX_HISTORY = 768, IMG_SEND_MAX_B64 = 400000;
+        const _imgSendCache = new Map();
+        async function _imgForSend(key, mediaType, b64, maxDim) {
+            const ck = `${key}|${maxDim}`;
+            if (_imgSendCache.has(ck)) return _imgSendCache.get(ck);
+            let out = { media_type: mediaType, data: b64 };
+            try {
+                const img = new Image();
+                await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = `data:${mediaType};base64,${b64}`; });
+                const w = img.naturalWidth, h = img.naturalHeight;
+                if (Math.max(w, h) > maxDim || b64.length > IMG_SEND_MAX_B64) {
+                    const scale = Math.min(1, maxDim / Math.max(w, h, 1));
+                    const c = document.createElement('canvas');
+                    c.width = Math.max(1, Math.round(w * scale));
+                    c.height = Math.max(1, Math.round(h * scale));
+                    const ctx = c.getContext('2d');
+                    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);  // PNG alpha → white, not black
+                    ctx.drawImage(img, 0, 0, c.width, c.height);
+                    const jpg = c.toDataURL('image/jpeg', 0.85).split(',')[1];
+                    if (jpg.length < b64.length) out = { media_type: 'image/jpeg', data: jpg };
+                }
+            } catch (e) { /* undecodable → send as stored */ }
+            _imgSendCache.set(ck, out);
+            return out;
+        }
+
+        async function _mmBlocks(text, maxDim = IMG_SEND_MAX_LATEST) {
             if (!text) return [];
             const blocks = [];
             let last = 0;
@@ -604,7 +679,7 @@ Detailed principles, philosophy, and self-modification mechanics are loaded as S
                 const rec = await _resolveMarkerRec(m[1]);
                 if (!rec || typeof rec.value !== 'string') continue;  // image gone → marker stays as text
                 if (m.index > last) blocks.push({ text: text.slice(last, m.index) });
-                blocks.push({ media_type: rec.media_type || 'image/jpeg', data: rec.value });
+                blocks.push(await _imgForSend(m[1], rec.media_type || 'image/jpeg', rec.value, maxDim));
                 last = m.index + m[0].length;
             }
             if (last < text.length) blocks.push({ text: text.slice(last) });

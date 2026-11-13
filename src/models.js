@@ -13,6 +13,8 @@ window.MODELS = {
     "nanogpt":    { "name": "NanoGPT", "format": "openai", "endpoint": "https://nano-gpt.com/api/v1/chat/completions" }
   },
   "models": [
+    { "name": "codex/gpt-6-astra", "format": "openai", "from": {
+      "infero": "codex/gpt-6-astra"}},
     { "name": "gemini-4-argon", "format": "gemini", "from": {
       "infero": "gemini-4-argon", "google": "gemini-4-argon", "openrouter": "google/gemini-4-argon" , "nanogpt": "google/gemini-4-argon"}},
     { "name": "gemini-3.8-flash", "format": "gemini", "from": {
