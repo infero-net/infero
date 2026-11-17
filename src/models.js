@@ -15,6 +15,10 @@ window.MODELS = {
   "models": [
     { "name": "codex/gpt-6-astra", "format": "openai", "from": {
       "infero": "codex/gpt-6-astra"}},
+    { "name": "gemini-4-hydrogen", "format": "gemini", "from": {
+      "infero": "gemini-4-hydrogen", "google": "gemini-4-hydrogen", "openrouter": "google/gemini-4-hydrogen" , "nanogpt": "google/gemini-4-hydrogen"}},
+    { "name": "gemini-4-carbon", "format": "gemini", "from": {
+      "infero": "gemini-4-carbon", "google": "gemini-4-carbon", "openrouter": "google/gemini-4-carbon" , "nanogpt": "google/gemini-4-carbon"}},
     { "name": "gemini-4-argon", "format": "gemini", "from": {
       "infero": "gemini-4-argon", "google": "gemini-4-argon", "openrouter": "google/gemini-4-argon" , "nanogpt": "google/gemini-4-argon"}},
     { "name": "gemini-3.8-flash", "format": "gemini", "from": {
@@ -29,6 +33,10 @@ window.MODELS = {
       "infero": "gemini-3.1-flash-lite", "google": "gemini-3.1-flash-lite", "openrouter": "google/gemini-3.1-flash-lite" , "nanogpt": "google/gemini-3.1-flash-lite"}},
     { "name": "gemini-3-flash", "format": "gemini", "from": {
       "infero": "gemini-3-flash-preview", "google": "gemini-3-flash-preview", "openrouter": "google/gemini-3-flash-preview" , "nanogpt": "google/gemini-3-flash-preview"}},
+    { "name": "gpt-6.1-terra-pro", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.1-terra-pro", "openrouter": "openai/gpt-6.1-terra-pro" , "nanogpt": "openai/gpt-6.1-terra-pro"}},
+    { "name": "gpt-6.1-terra", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.1-terra", "openrouter": "openai/gpt-6.1-terra" , "nanogpt": "openai/gpt-6.1-terra"}},
     { "name": "gpt-6.1-sol-pro", "format": "openai", "stop": false, "from": {
       "openai": "gpt-6.1-sol-pro", "openrouter": "openai/gpt-6.1-sol-pro" , "nanogpt": "openai/gpt-6.1-sol-pro"}},
     { "name": "gpt-6.1-sol", "format": "openai", "stop": false, "from": {
@@ -73,6 +81,8 @@ window.MODELS = {
       "deepseek": "deepseek-v4-pro", "openrouter": "deepseek/deepseek-v4-pro" , "nanogpt": "deepseek/deepseek-v4-pro"}},
     { "name": "deepseek-v4-flash", "format": "openai", "vision": false, "maxContext": 1000000, "from": {
       "deepseek": "deepseek-v4-flash", "openrouter": "deepseek/deepseek-v4-flash" , "nanogpt": "deepseek/deepseek-v4-flash"}},
+    { "name": "qwen4-max", "format": "openai", "maxContext": 128000, "vision": true, "from": {
+      "dashscope": "qwen4-max", "openrouter": "qwen/qwen4-max" , "nanogpt": "qwen/qwen4-max"}},
     { "name": "qwen3.8-max-prime", "format": "openai", "maxContext": 128000, "vision": true, "from": {
       "dashscope": "qwen3.8-max-prime", "openrouter": "qwen/qwen3.8-max-prime" , "nanogpt": "qwen/qwen3.8-max-prime"}},
     { "name": "qwen3.8-flash", "format": "openai", "maxContext": 128000, "vision": true, "from": {
