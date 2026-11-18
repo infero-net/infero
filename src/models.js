@@ -33,6 +33,14 @@ window.MODELS = {
       "infero": "gemini-3.1-flash-lite", "google": "gemini-3.1-flash-lite", "openrouter": "google/gemini-3.1-flash-lite" , "nanogpt": "google/gemini-3.1-flash-lite"}},
     { "name": "gemini-3-flash", "format": "gemini", "from": {
       "infero": "gemini-3-flash-preview", "google": "gemini-3-flash-preview", "openrouter": "google/gemini-3-flash-preview" , "nanogpt": "google/gemini-3-flash-preview"}},
+    { "name": "gpt-6.2-astra-pro", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.2-astra-pro", "openrouter": "openai/gpt-6.2-astra-pro" , "nanogpt": "openai/gpt-6.2-astra-pro"}},
+    { "name": "gpt-6.2-astra", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.2-astra", "openrouter": "openai/gpt-6.2-astra" , "nanogpt": "openai/gpt-6.2-astra"}},
+    { "name": "gpt-6.2-sol-pro", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.2-sol-pro", "openrouter": "openai/gpt-6.2-sol-pro" , "nanogpt": "openai/gpt-6.2-sol-pro"}},
+    { "name": "gpt-6.2-sol", "format": "openai", "stop": false, "from": {
+      "openai": "gpt-6.2-sol", "openrouter": "openai/gpt-6.2-sol" , "nanogpt": "openai/gpt-6.2-sol"}},
     { "name": "gpt-6.1-terra-pro", "format": "openai", "stop": false, "from": {
       "openai": "gpt-6.1-terra-pro", "openrouter": "openai/gpt-6.1-terra-pro" , "nanogpt": "openai/gpt-6.1-terra-pro"}},
     { "name": "gpt-6.1-terra", "format": "openai", "stop": false, "from": {
