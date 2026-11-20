@@ -6,33 +6,17 @@ Mirrors the rolling-history Anthropic cache layout from src/index.html:
 
 Run: python3 -m pytest relay/tests/test_build_payload.py -v
 """
-import importlib.util
 import os
 import sys
-import types
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def _load_agent():
-    """Load relay/agent.py with aiohttp stubbed so tests don't need it installed."""
-    sys.modules.setdefault('aiohttp', types.SimpleNamespace())
-    spec = importlib.util.spec_from_file_location('agent', os.path.join(ROOT, 'relay', 'agent.py'))
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        # the module may run side-effects that fail without a relay context — ignore;
-        # we only need the class.
-        pass
-    return mod
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from agent_loader import load_agent  # noqa: E402
 
 
 def _make_worker(consciousness='', core_mem='', skills=None, realtime='', metadata=None):
-    mod = _load_agent()
-    GW = next(getattr(mod, n) for n in dir(mod) if isinstance(getattr(mod, n), type) and 'Worker' in n)
-    w = GW.__new__(GW)
+    mod = load_agent()
+    w = mod.GenesisWorker.__new__(mod.GenesisWorker)
     w.being_id = 'test_being'
     w.consciousness = consciousness
     w.metadata = metadata or {}
@@ -175,7 +159,8 @@ class OpenAILayout(unittest.TestCase):
             realtime='RT',
         )
         p = w._build_payload('openai', 'gpt-x', 'sys', False)
-        text = p['messages'][1]['content'][0]['text']
+        # stable head + history in block 0, realtime + being prefix in the last block
+        text = ''.join(b['text'] for b in p['messages'][1]['content'] if b['type'] == 'text')
         self.assertIn('CORE MEMORY', text)
         self.assertIn('SKILLS', text)
         self.assertIn('HISTORY', text)
@@ -189,7 +174,7 @@ class GeminiLayout(unittest.TestCase):
     def test_no_cache_buffer_includes_stable_head(self):
         w = _make_worker(consciousness='HIST', core_mem='CM', realtime='RT')
         p = w._build_payload('gemini', 'gemini-x', 'sys', False)
-        text = p['contents'][0]['parts'][0]['text']
+        text = ''.join(part.get('text', '') for part in p['contents'][0]['parts'])
         self.assertIn('CORE MEMORY', text)  # stable_head present
         self.assertIn('HIST', text)
         self.assertIn('RT', text)
@@ -205,7 +190,7 @@ class GeminiLayout(unittest.TestCase):
             metadata={'cacheName': 'caches/abc', 'cachedLength': 4},
         )
         p = w._build_payload('gemini', 'gemini-x', 'sys', False)
-        text = p['contents'][0]['parts'][0]['text']
+        text = ''.join(part.get('text', '') for part in p['contents'][0]['parts'])
         self.assertIn('cachedContent', p)
         self.assertNotIn('systemInstruction', p)
         self.assertNotIn('CORE MEMORY', text)  # stable_head NOT re-sent

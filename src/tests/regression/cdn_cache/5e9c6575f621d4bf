@@ -1,0 +1,2 @@
+/* esm.sh - @scure/bip39@1.5.0/wordlists/english */
+export * from "/@scure/bip39@1.5.0/es2022/wordlists/english.mjs";
