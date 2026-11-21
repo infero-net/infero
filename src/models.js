@@ -15,6 +15,8 @@ window.MODELS = {
   "models": [
     { "name": "codex/gpt-6-astra", "format": "openai", "from": {
       "infero": "codex/gpt-6-astra"}},
+    { "name": "gemini-4-neon", "format": "gemini", "from": {
+      "infero": "gemini-4-neon", "google": "gemini-4-neon", "openrouter": "google/gemini-4-neon" , "nanogpt": "google/gemini-4-neon"}},
     { "name": "gemini-4-hydrogen", "format": "gemini", "from": {
       "infero": "gemini-4-hydrogen", "google": "gemini-4-hydrogen", "openrouter": "google/gemini-4-hydrogen" , "nanogpt": "google/gemini-4-hydrogen"}},
     { "name": "gemini-4-carbon", "format": "gemini", "from": {
