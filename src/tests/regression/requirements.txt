@@ -1,0 +1,6 @@
+# Regression suite (src/tests/regression) and relay unit tests (relay/tests)
+pytest>=7
+playwright>=1.40     # then: python3 -m playwright install firefox webkit  (Chromium: system or Playwright's)
+websockets>=12.0     # relay/agent.py imports these at module load
+aiohttp>=3.9
+cryptography>=42.0

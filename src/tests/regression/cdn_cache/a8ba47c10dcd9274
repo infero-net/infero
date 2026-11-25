@@ -1,0 +1,3 @@
+/* esm.sh - @noble/curves@1.9.7/abstract/modular */
+import "/@noble/curves@1.9.7/es2022/utils.mjs";
+export * from "/@noble/curves@1.9.7/es2022/abstract/modular.mjs";

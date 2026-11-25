@@ -29,12 +29,27 @@ Asserts: selected model matches, ≥1 `streamGenerateContent` request, response
 > 400 chars. Saves a screenshot to `/tmp/genesis_smoke_<env>_<model>.png`.
 Use this when adding/bumping a model in `models.js`.
 
+## Regression suite (offline — run before merging)
+
+Tests the features the app has today against a local fake LLM, a stub hub and a local relay + agent:
+no API keys, no network. Five test types (function, loop, reload, JS–Python match, device), 292 tests, ~10 min per browser.
+See `regression/README.md`; the case list is `regression/CHECKLIST.md`, bugs found are in
+`regression/BUGS.md`.
+
+```bash
+pip install -r src/tests/regression/requirements.txt
+python3 src/tests/regression/run.py                    # all, Chromium
+python3 src/tests/regression/run.py --browser all      # + Firefox, WebKit
+python3 src/tests/regression/run.py --src ../other/src --json other.json   # test another copy
+python3 src/tests/regression/compare.py dev.json other.json                # what changed
+```
+
 ## Unit tests
 
 ```bash
-python3 -m pytest relay/tests/ -v          # _build_payload, _compress
-python3 src/tests/cache_merged_block_test.py
-python3 src/tests/test_shell_timeout.py
+python3 -m pytest relay/tests/ -v          # agent.py: _build_payload, _maybe_compress_consciousness
 ```
+`relay/tests/agent_loader.py` loads `agent.py` without starting it (needs `websockets`, `aiohttp`).
 
-`TEST_PLAN.md` holds the manual UI checks (self-loop, theme switch).
+`experiments/cache_merged_block_test.py` is a caching experiment against the live Anthropic API (needs a
+key), not a test.
