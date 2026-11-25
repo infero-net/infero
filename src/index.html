@@ -2552,6 +2552,11 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
 
         async function timeRewind(div) {
             if (loopRunning) return;
+            // A click that ends a text selection is the user copying text, not asking to rewind.
+            // Without this check, dragging over a message pops the rewind dialog, and one stray OK
+            // truncates the consciousness stream irreversibly.
+            const sel = window.getSelection && window.getSelection();
+            if (sel && String(sel).trim().length > 0) return;
             const userText = div.dataset.userText;
             if (!confirm('Rewind time to this point?')) return;
             // Find the [System Environment] block that contains this user text in consciousness (search from end)
