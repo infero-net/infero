@@ -2568,6 +2568,14 @@ UI: verdict renders at #canvas-container > #html-div > #hub-overlay-upload.`,
             if (envStart === -1) return;
             // Truncate consciousness before this block
             consciousness = consciousness.slice(0, envStart).trimEnd() + '\n\n';
+            // The Gemini named cache holds consciousness[0..cachedLength] as it was when the cache
+            // was built. If we cut inside that range, the server would keep prepending the removed
+            // turns, so the rewind would silently not take effect. Drop the cache in that case.
+            if (cacheName && envStart < cachedLength) {
+                cacheName = null;
+                cachedLength = 0;
+                _cachedStableHead = null;
+            }
             await appendConsciousness('');  // persist
             // Put text into input box
             document.getElementById('input').value = userText;
